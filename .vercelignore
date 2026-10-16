@@ -1,0 +1,8 @@
+__pycache__
+output
+.playwright-cli
+tests
+docs
+companion.py
+synthesize.py
+Start Voice Agent.command
