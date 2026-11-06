@@ -176,6 +176,9 @@ def chat(data,payload,stop,on_text,meter=None):
 def cloud_ready(data):
     cloud=config(data)
     if not cloud:return None
+    headers={'Authorization':'Bearer '+cloud['key']}
+    # Anthropic's model list is its native API, which authenticates differently from its OpenAI-compatible chat endpoint.
+    if 'api.anthropic.com' in cloud['base_url']:headers={'x-api-key':cloud['key'],'anthropic-version':'2023-06-01'}
     try:
-        with urlopen(Request(cloud['base_url']+'/models',headers={'Authorization':'Bearer '+cloud['key']}),timeout=3) as response:return response.status==200
+        with urlopen(Request(cloud['base_url']+'/models',headers=headers),timeout=3) as response:return response.status==200
     except Exception:return False
