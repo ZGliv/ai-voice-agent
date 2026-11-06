@@ -45,6 +45,12 @@ def readonly(tools):
         if READ_VERB.match(action) and not WRITE_WORD.search(action):allowed.append(name)
     return allowed
 
+def stale(core,tools):
+    # A list cached while signed out has no account connectors; refresh it (and at least every 6 hours).
+    path=core.DATA/'assistant-tools.json'
+    connectors=[t for t in tools if t.startswith('mcp__') and 'telegram' not in t]
+    return not connectors or not path.is_file() or time.time()-path.stat().st_mtime>6*3600
+
 def known_tools(core):
     try:return json.loads((core.DATA/'assistant-tools.json').read_text())
     except (OSError,ValueError):return []
@@ -96,7 +102,7 @@ def run(core,job,approved=None):
             if codex_jobs.get_job(core,job['id'])['status'] not in codex_jobs.ACTIVE_STATES:return
             codex_jobs.update(core,job['id'],status='running',worktree=str(workspace))
         tools=known_tools(core)
-        if not tools:
+        if stale(core,tools):
             codex_jobs.progress(core,job['id'],'Checking which of your accounts are connected.')
             tools=discover(core)
         allowed=readonly(tools)
