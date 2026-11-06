@@ -168,7 +168,10 @@ def chat(data,payload,stop,on_text,meter=None):
     local={**payload,'model':LOCAL_MODEL,'think':False,'keep_alive':-1}
     local['options']={'num_ctx':8192,**payload.get('options',{})}
     if meter is not None:meter.setdefault('model',LOCAL_MODEL);meter['local']=True
-    return local_runtime.chat(OLLAMA+'/api/chat',local,stop,on_text)
+    started=time.monotonic()
+    reply=local_runtime.chat(OLLAMA+'/api/chat',local,stop,on_text)
+    if meter is not None:meter.setdefault('calls',[]).append({'total':round(time.monotonic()-started,3),'local':True})
+    return reply
 
 def cloud_ready(data):
     cloud=config(data)

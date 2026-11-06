@@ -104,4 +104,21 @@ class AssistantTests(unittest.TestCase):
   job={**job,'status':'awaiting_approval','result':'I will email Sarah that you are late.'}
   self.assertIn('approval',job_announcements.message(job))
 
+class HandoffGuardTests(unittest.TestCase):
+ def setUp(self):
+  catalog=patch('project_memory.catalog',return_value=[]);catalog.start();self.addCleanup(catalog.stop)
+  self.temp=tempfile.TemporaryDirectory();self.old=c.DATA;c.DATA=Path(self.temp.name);c.CURRENT=None;c.STOP.clear();c.initialize()
+  with c.connect() as db:db.execute('INSERT INTO conversations VALUES(?,?,?,?)',('a'*32,'Test',time.time(),time.time()))
+ def tearDown(self):c.DATA=self.old;self.temp.cleanup()
+ def test_invented_calendar_answer_is_replaced_by_a_handoff(self):
+  with patch.object(c,'launch'):item=c.create_turn('a'*32,text="What's on my calendar tomorrow?")
+  invented={'role':'assistant','content':'You have a meeting with Mr. Stark at 10.'}
+  with patch('fish_voice.key',return_value=None),patch('brain.chat',return_value=invented),\
+       patch('assistant_jobs.delegate',return_value={'id':'j'*32,'task':'x','status':'preparing'}) as delegate,patch.object(c.SPEECH,'call',side_effect=RuntimeError('no speech in tests')):
+   c.CURRENT=item['id'];c.work(item['id'])
+  done=c.turn(item['id'])
+  delegate.assert_called_once()
+  self.assertNotIn('Stark',done['output_text']);self.assertIn('checking',done['output_text'])
+  self.assertTrue(done['timings']['handoff_guard'])
+
 if __name__=='__main__':unittest.main()

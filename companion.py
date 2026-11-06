@@ -65,6 +65,11 @@ def needs_tools(text):
     # enforce their own project scope and consent checks.
     return bool(re.search(r"\b(save|remember|recall|forget|memory|decid(?:e|ed|ing)|decision|agree|agreed|project|parlay|parlai|codex|claude|job|task|status|build|implement|create|make|edit|fix|change|update|delete|remove|open|launch|start|run|stop|cancel|resume|deploy|publish|send|search|research|look up|look at|check|latest|current|today|weather|news|calendar|email|emails|inbox|meeting|meetings|schedule|remind|reminder|notion|drive|doc|docs|text me|call me|message|tomorrow|tonight|yes|yeah|approve|go ahead|do it|send it|book it|decline|don't|my|our)\b|\b(?:we|I) (?:did|said|left|agreed|chose)\b|^(?:please )?pause\b|\bpause (?:listening|the conversation)\b",text,re.I))
 
+ACCOUNT_DATA=re.compile(r"\b(calendar|schedule|agenda|email|emails|e-mail|inbox|gmail|mail|unread|meeting|meetings|appointment|appointments|notion|google drive|my drive|my docs?|my documents)\b",re.I)
+# Tools that genuinely consult or act on Zack's accounts/schedules; any other answer about them is invented.
+HANDOFF_ACK='I’m on it. I’ll tell you as soon as I have the answer.'
+HANDOFF_TOOLS={'delegate_task','schedule_task','list_schedules','change_schedule','job_status','read_job_result','approve_job','cancel_job','pause_listening'}
+
 def warm_reasoning():
     if brain.config(DATA):return  # Cloud brain: leave the ~6.5 GB local model unloaded.
     try:
@@ -307,7 +312,7 @@ def work(turn_id):
                     if checkin:raise Problem('The project reply was not in the expected format. Please try again.',503)
                     messages.append({'role':'system','content':route_rule})
             if incremental and not checkin and needs_tools(item['input_text']):messages.append({'role':'system','content':route_rule})
-            ready_to_speak=False
+            ready_to_speak=False;used=set();delegated=False
             for tool_round in range(0 if conversational else 4):
                 response=think({'model':LLM,'messages':messages,'think':False,
                     'tools':route_tools if incremental else companion_tools.TOOLS,'keep_alive':-1,
@@ -320,11 +325,12 @@ def work(turn_id):
                 update(turn_id,partial_text='')
                 for call in calls[:4]:
                     if STOP.is_set():raise Cancelled()
-                    function=call.get('function',{});name=function.get('name','')
+                    function=call.get('function',{});name=function.get('name','');used.add(name)
                     if incremental and name=='speak_response':
                         ready_to_speak=True;messages.append({'role':'tool','tool_name':name,'content':'Streaming reply is ready to start.'});continue
                     try:result=companion_tools.execute(sys.modules[__name__],item,name,function.get('arguments',{}))
                     except Problem as error:result={'error':error.message}
+                    delegated=delegated or (name=='delegate_task' and 'error' not in result)
                     messages.append({'role':'tool','tool_name':name,'content':json.dumps(result)})
                 if ready_to_speak:break
             else:
@@ -335,6 +341,15 @@ def work(turn_id):
                         'keep_alive':-1,'options':{'num_predict':300,'num_ctx':LLM_CONTEXT,'temperature':.4}},
                         lambda partial:update(turn_id,partial_text=partial))
                     if not response.get('tool_calls'):text=response.get('content','').strip()
+            if not conversational and ACCOUNT_DATA.search(item['input_text']) and not used&HANDOFF_TOOLS:
+                # The model tried to answer about Zack's accounts without looking. Never speak that; hand it off.
+                try:result=companion_tools.execute(sys.modules[__name__],item,'delegate_task',{'task':item['input_text']})
+                except Problem as error:result={'error':error.message}
+                messages+=[{'role':'assistant','content':'','tool_calls':[{'function':{'name':'delegate_task','arguments':{'task':item['input_text']}}}]},
+                  {'role':'tool','tool_name':'delegate_task','content':json.dumps(result)}]
+                timings['handoff_guard']=True;delegated='error' not in result;used.add('delegate_task')
+                if incremental:ready_to_speak=True
+                else:text='I’m checking that now.' if 'error' not in result else result['error']
             if ready_to_speak:
                 messages=[message for message in messages if not (message['role']=='system' and message['content']==route_rule)]
                 messages[0]['content']='You are JARVIS, a composed, capable British personal assistant. The speech renderer adds the address Sir, automatically. Do not add an address yourself. Never call the user Zack. Be precise and quietly witty. Answer the actual question first in one or two short sentences unless asked for detail. When a specific project is named, focus only on it; do not read a list of other projects. Plain conversational text only, no markup or preamble. This pass can only speak, not use tools. Never claim to have looked up, saved, changed, opened or started anything without a confirming tool result in this conversation. Explain failed or unfinished requested actions honestly. A running job is not complete. Do not read IDs or URLs aloud.\nSelected project: '+str(selected)+'\nSaved reference: '+reference
@@ -350,8 +365,12 @@ def work(turn_id):
                     if not partial:return
                     update(turn_id,partial_text=partial)
                     text_stream.feed(partial)
-                response=think({'model':LLM,'messages':messages,'think':False,
-                    'keep_alive':-1,'options':{'num_predict':300,'num_ctx':LLM_CONTEXT,'temperature':.4}},speak_partial)
+                if delegated and used<={'delegate_task','speak_response'}:
+                    # Nothing is known yet; a model asked to "describe" a started lookup tends to invent its answer.
+                    response={'role':'assistant','content':HANDOFF_ACK};speak_partial(HANDOFF_ACK)
+                else:
+                    response=think({'model':LLM,'messages':messages,'think':False,
+                        'keep_alive':-1,'options':{'num_predict':300,'num_ctx':LLM_CONTEXT,'temperature':.4}},speak_partial)
                 if response.get('tool_calls'):raise Problem('The spoken answer requested an unexpected action. No additional action was run.',503)
                 raw_text=addressed_reply(response.get('content',''));text=raw_text.strip()
                 if not text:raise Problem('The spoken answer was empty.',503)
