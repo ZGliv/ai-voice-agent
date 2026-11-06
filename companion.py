@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Loopback-only companion. Explicit Fish speech and Codex handoffs; no dummy output."""
-import project_memory, companion_tools, codex_jobs, local_runtime, fish_voice, native_transcriber, brain
+import project_memory, companion_tools, codex_jobs, local_runtime, fish_voice, native_transcriber, brain, scheduler, notify, phone, assistant_jobs
 import sys, hashlib, speech_text, base64, fish_text_stream
 from live_drafts import DRAFTS
 from streaming_recognition import StreamingRecognition
@@ -63,7 +63,7 @@ def needs_tools(text):
     # Keep explicit actions and personal/project facts out of the speech-only path.
     # This is a conservative guard, not an authorization mechanism; tools still
     # enforce their own project scope and consent checks.
-    return bool(re.search(r"\b(save|remember|recall|forget|memory|decid(?:e|ed|ing)|decision|agree|agreed|project|parlay|parlai|codex|claude|job|task|status|build|implement|create|make|edit|fix|change|update|delete|remove|open|launch|start|run|stop|cancel|resume|deploy|publish|send|search|research|look up|look at|check|latest|current|today|weather|news|calendar|email|my|our)\b|\b(?:we|I) (?:did|said|left|agreed|chose)\b|^(?:please )?pause\b|\bpause (?:listening|the conversation)\b",text,re.I))
+    return bool(re.search(r"\b(save|remember|recall|forget|memory|decid(?:e|ed|ing)|decision|agree|agreed|project|parlay|parlai|codex|claude|job|task|status|build|implement|create|make|edit|fix|change|update|delete|remove|open|launch|start|run|stop|cancel|resume|deploy|publish|send|search|research|look up|look at|check|latest|current|today|weather|news|calendar|email|emails|inbox|meeting|meetings|schedule|remind|reminder|notion|drive|doc|docs|text me|call me|message|tomorrow|tonight|yes|yeah|approve|go ahead|do it|send it|book it|decline|don't|my|our)\b|\b(?:we|I) (?:did|said|left|agreed|chose)\b|^(?:please )?pause\b|\bpause (?:listening|the conversation)\b",text,re.I))
 
 def warm_reasoning():
     if brain.config(DATA):return  # Cloud brain: leave the ~6.5 GB local model unloaded.
@@ -115,6 +115,7 @@ def initialize():
         project_memory.initialize(db)
         companion_tools.initialize(db)
         codex_jobs.initialize(db)
+        scheduler.initialize(db)
         if 'partial_text' not in [r[1] for r in db.execute('PRAGMA table_info(turns)')]:
             db.execute("ALTER TABLE turns ADD COLUMN partial_text TEXT DEFAULT ''")
         if 'client_action' not in [r[1] for r in db.execute('PRAGMA table_info(turns)')]:
@@ -163,6 +164,7 @@ def dependency_status():
         except Exception: pass
     result = {'local': True, 'ready': all(checks.values()), 'checks': checks, 'active': CURRENT,
             'models': {'transcription': 'Kyutai streaming · semantic turns' if STREAMING.ready else 'Kyutai warming up', 'reasoning': brain.label(DATA), 'speech': 'Fish · Jarvis (MCU) · free' if fish_voice.key(DATA) else 'Piper · Alan (British English)'},
+            'reach': {'assistant': assistant_jobs.available(), 'telegram': notify.ready(DATA), 'phone': phone.ready(DATA)},
             'storage': 'This computer · SQLite and local audio files', 'max_seconds': 60}
     HEALTH_CACHE=(time.monotonic(),result)
     return result
@@ -617,6 +619,8 @@ if __name__=='__main__':
         site_preview.configure_remote(preview_origin)
         codex_jobs.restore_remote_preview(sys.modules[__name__])
     warm_models()
+    scheduler.start(sys.modules[__name__])
+    phone_server=phone.start(sys.modules[__name__])
     print(f'AI Voice Agent · http://127.0.0.1:{PORT} · Ctrl-C to stop',flush=True)
     try: server.serve_forever()
     except KeyboardInterrupt:pass
@@ -626,6 +630,7 @@ if __name__=='__main__':
             if PROCESS and PROCESS.poll() is None:
                 try: os.killpg(PROCESS.pid,signal.SIGTERM)
                 except ProcessLookupError: pass
-        codex_jobs.shutdown()
+        codex_jobs.shutdown();scheduler.STOP.set()
+        if phone_server:phone_server.shutdown()
         STREAMING.close();SPEECH.close(); TRANSCRIBER.close()
         server.server_close()

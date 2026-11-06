@@ -1,10 +1,20 @@
-"""Cached, factual task-completion speech; never synthesize a worker's untrusted output."""
+"""Cached task-completion speech. Only assistant answers (meant for Zack) are read aloud; other worker output never is."""
 import hashlib, threading
-import fish_voice
+import fish_voice, speech_text
 LOCK=threading.Lock()
-TERMINAL={'completed','failed','interrupted','cancelled'}
+TERMINAL={'completed','failed','interrupted','cancelled','awaiting_approval'}
+
+def spoken_answer(text):
+    # The assistant puts a short spoken answer first; read only that paragraph, bounded.
+    first=speech_text.for_speech(text.strip().split('\n\n')[0])
+    if len(first)>420:first=first[:420].rsplit('. ',1)[0]+'.'
+    return first
 
 def message(job):
+    if job['project_id']=='__assistant__':
+        if job['status']=='awaiting_approval':
+            return 'I need your approval before I go ahead. '+spoken_answer(job.get('result','') or '')+' Shall I proceed?'
+        if job['status']=='completed' and job.get('result'):return spoken_answer(job['result'])
     if job['status']=='completed':
         if job.get('error'):return 'The task finished, but its checks need attention. Ask me for the details.'
         if job['project_id']=='__research__':return 'Your research report is ready. Ask me what I found.'

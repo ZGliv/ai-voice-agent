@@ -5,7 +5,8 @@ from pathlib import Path
 LOCK=threading.RLock()
 PROCESSES={}
 ACTIVE_STATES={'running','preparing'}
-STANDALONE={'__new_site__','__research__'}
+STANDALONE={'__new_site__','__research__','__assistant__'}
+LABELS={'__new_site__':'New website','__research__':'Research','__assistant__':'Assistant'}
 
 def initialize(db):
     db.executescript('''CREATE TABLE IF NOT EXISTS codex_jobs(
@@ -14,7 +15,7 @@ def initialize(db):
       source_turn_id TEXT UNIQUE,created REAL,updated REAL);
       UPDATE codex_jobs SET status='interrupted',error='Companion restarted; review the Codex session before trying again.' WHERE status='running';''')
     columns={r[1] for r in db.execute('PRAGMA table_info(codex_jobs)')}
-    for name,definition in {'context':"TEXT DEFAULT ''",'progress':"TEXT DEFAULT '[]'",'worktree':"TEXT DEFAULT ''",'preview_dir':"TEXT DEFAULT ''",'preview_url':"TEXT DEFAULT ''",'site_name':"TEXT DEFAULT ''",'parent_id':"TEXT DEFAULT ''",'verification':"TEXT DEFAULT '{}'"}.items():
+    for name,definition in {'approval':"TEXT DEFAULT '{}'",'context':"TEXT DEFAULT ''",'progress':"TEXT DEFAULT '[]'",'worktree':"TEXT DEFAULT ''",'preview_dir':"TEXT DEFAULT ''",'preview_url':"TEXT DEFAULT ''",'site_name':"TEXT DEFAULT ''",'parent_id':"TEXT DEFAULT ''",'verification':"TEXT DEFAULT '{}'"}.items():
         if name not in columns:db.execute(f'ALTER TABLE codex_jobs ADD COLUMN {name} {definition}')
     db.execute("UPDATE codex_jobs SET preview_url=''")
     db.execute("UPDATE codex_jobs SET status='interrupted',error='Companion restarted during preparation.' WHERE status='preparing'")
@@ -25,14 +26,14 @@ def projects(core):
     return {pid:str(Path(path).resolve()) for pid,path in registry.items() if isinstance(path,str) and Path(path).is_dir() and (Path(path)/'.git').exists()}
 
 def list_jobs(core):
-    names={p['id']:p['name'] for p in project_memory.catalog()};names['__new_site__']='New website';names['__research__']='Research'
+    names={p['id']:p['name'] for p in project_memory.catalog()};names.update(LABELS)
     with core.connect() as db:return [{**dict(r),'project_name':names.get(r['project_id'],r['project_id'])} for r in db.execute('SELECT * FROM codex_jobs ORDER BY created DESC LIMIT 40')]
 
 def search_jobs(core,query=''):
     if not isinstance(query,str) or len(query)>160:raise core.Problem('Use up to 160 characters to search saved jobs.')
     terms=query.split()
     if len(terms)>8:raise core.Problem('Search with at most eight distinctive words.')
-    names={p['id']:p['name'] for p in project_memory.catalog()};names.update({'__new_site__':'New website','__research__':'Research'})
+    names={p['id']:p['name'] for p in project_memory.catalog()};names.update(LABELS)
     clauses=[];values=[]
     for term in terms:
         # Literal substring search: punctuation cannot become SQL or LIKE wildcards.
@@ -151,8 +152,16 @@ def start_job(core,jid):
     with LOCK:
         job=get_job(core,jid)
         if job['status']!='draft':return job
-        with core.connect() as db:active=db.execute("SELECT 1 FROM codex_jobs WHERE status IN ('running','preparing') LIMIT 1").fetchone()
-        if active:raise core.Problem('A Codex job is already running. Wait or cancel it first.',409)
+        assistant=job['project_id']=='__assistant__'
+        # Assistant tasks and Codex work run in separate lanes: one of each at a time.
+        lane="project_id='__assistant__'" if assistant else "project_id!='__assistant__'"
+        with core.connect() as db:active=db.execute(f"SELECT 1 FROM codex_jobs WHERE status IN ('running','preparing') AND {lane} LIMIT 1").fetchone()
+        if active:raise core.Problem('An assistant task is already running. Wait or cancel it first.' if assistant else 'A Codex job is already running. Wait or cancel it first.',409)
+        if assistant:
+            import assistant_jobs
+            update(core,jid,status='preparing')
+            threading.Thread(target=assistant_jobs.run,args=(core,job),daemon=True).start()
+            return get_job(core,jid)
         folder=projects(core).get(job['project_id']) if job['project_id'] not in STANDALONE else None
         if not job.get('parent_id') and job['project_id'] not in STANDALONE and not folder:raise core.Problem('The approved project folder is unavailable.',409)
         if not shutil.which('codex'):raise core.Problem('Codex is not installed.',503)
@@ -182,12 +191,13 @@ def consume_event(core,jid,event):
     elif kind=='file_change' and event_type=='item.completed':progress(core,jid,'Updated files: '+', '.join(c.get('path','') for c in item.get('changes',[])))
     elif event_type=='turn.failed':progress(core,jid,'Codex reported a failure. '+str(event.get('error',{}).get('message','')))
 
-def execute_worker(core,job,command,prompt,directory,prefix='',limit=1800):
+def execute_worker(core,job,command,prompt,directory,prefix='',limit=1800,cwd=None,env=None,parse=None):
     """One bounded worker process; cancellation uses the same job process registry."""
+    parse=parse or (lambda event:consume_event(core,job['id'],event))
     with (directory/(prefix+'events.jsonl')).open('w') as out,(directory/(prefix+'stderr.log')).open('w') as err:
         with LOCK:
             if get_job(core,job['id'])['status']!='running':return
-            process=subprocess.Popen(command,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=err,text=True,start_new_session=True,bufsize=1)
+            process=subprocess.Popen(command,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=err,text=True,start_new_session=True,bufsize=1,cwd=cwd,env=env)
             PROCESSES[job['id']]=process
             process.stdin.write(prompt);process.stdin.close()
         def timeout():
@@ -197,7 +207,7 @@ def execute_worker(core,job,command,prompt,directory,prefix='',limit=1800):
         try:
             for line in process.stdout:
                 out.write(line);out.flush()
-                try:consume_event(core,job['id'],json.loads(line))
+                try:parse(json.loads(line))
                 except (ValueError,TypeError):pass
             process.wait()
         finally:timer.cancel()
@@ -304,10 +314,10 @@ def cancel_job(core,jid):
     """Stop this exact job without deleting its workspace or changing terminal results."""
     with LOCK:
         job=get_job(core,jid)
-        if job['status'] not in {'draft',*ACTIVE_STATES}:return job
+        if job['status'] not in {'draft','awaiting_approval',*ACTIVE_STATES}:return job
         update(core,jid,status='cancelled')
         if jid in PROCESSES:terminate(PROCESSES[jid])
-        progress(core,jid,'Cancelled by request. Files already written are preserved.')
+        progress(core,jid,'Declined. Nothing was sent or changed.' if job['status']=='awaiting_approval' else 'Cancelled by request. Files already written are preserved.')
         return get_job(core,jid)
 
 def open_preview(core,jid):
@@ -322,7 +332,7 @@ def open_preview(core,jid):
 def dispatch(handler,method,path,core):
     if path=='/api/jobs' and method=='GET':
         handler.send(200,{'jobs':list_jobs(core),'projects':list(projects(core)),'available':bool(shutil.which('codex'))});return True
-    match=re.fullmatch(r'/api/jobs/([a-f0-9]{32})(?:/(start|cancel|preview|preview-device|announcement|announcement/audio))?',path)
+    match=re.fullmatch(r'/api/jobs/([a-f0-9]{32})(?:/(start|cancel|approve|preview|preview-device|announcement|announcement/audio))?',path)
     if not match:return False
     jid,action=match[1],match[2]
     if method=='GET' and not action:handler.send(200,get_job(core,jid));return True
@@ -337,6 +347,9 @@ def dispatch(handler,method,path,core):
         job_announcements.prepare(core,get_job(core,jid))
         handler.send(200,{'url':f'/api/jobs/{jid}/announcement/audio'});return True
     if action=='start':handler.send(200,start_job(core,jid));return True
+    if action=='approve':
+        import assistant_jobs
+        handler.send(200,assistant_jobs.approve(core,jid));return True
     if action=='preview':handler.send(200,open_preview(core,jid));return True
     if action=='preview-device':
         job=get_job(core,jid)

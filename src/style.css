@@ -57,3 +57,5 @@ header{position:fixed;top:18px;left:20px;height:auto;border:0;z-index:32}
 .orb-only .stage{grid-template-columns:1fr;grid-template-rows:1fr;max-width:none}
 .orb-only .orb-wrap{justify-self:center}
 .orb-only #orb.orb-unavailable{background:radial-gradient(circle,rgba(109,224,244,.7) 0,rgba(58,156,185,.18) 18%,transparent 58%);box-shadow:inset 0 0 0 1px #2b6575}
+
+.job-approval pre{white-space:pre-wrap;word-break:break-word;font-size:.8rem;max-height:14rem;overflow:auto;margin:.4rem 0;padding:.6rem;border-radius:.5rem;background:rgba(0,0,0,.3)}

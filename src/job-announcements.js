@@ -1,4 +1,4 @@
-const TERMINAL=new Set(['completed','failed','interrupted','cancelled']);
+const TERMINAL=new Set(['completed','failed','interrupted','cancelled','awaiting_approval']);
 export class JobAnnouncements {
  constructor({storage,ready,speak,now=Date.now}){
   Object.assign(this,{storage,ready,speak,now});this.pending=new Map();this.inflight=false;this.retryAt=0;this.sessionStart=now()/1000;
