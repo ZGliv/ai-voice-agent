@@ -549,6 +549,9 @@ class Handler(BaseHTTPRequestHandler):
             if codex_jobs.dispatch(self,method,path,sys.modules[__name__]): return
             if project_memory.dispatch(self,method,path,sys.modules[__name__]): return
             if path == '/api/health' and method=='GET': return self.send(200,dependency_status())
+            if path == '/api/phone/call' and method=='POST':
+                text=json.loads(self.body() or b'{}').get('text') or 'Good evening, sir. This is your test call. Say anything and I will answer, or say goodbye.'
+                return self.send(202,phone.call(sys.modules[__name__],str(text)[:600]))
             if path == '/api/conversations':
                 with connect() as db:
                     if method=='GET': return self.send(200,[dict(x) for x in db.execute('SELECT * FROM conversations ORDER BY updated DESC')])

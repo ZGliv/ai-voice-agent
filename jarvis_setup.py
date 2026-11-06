@@ -125,7 +125,14 @@ def twilio(_):
     print('Then restart Jarvis:  python3 jarvis_setup.py restart')
 
 def call_test(_):
-    print(phone.call(Core,'Good evening, sir. This is your test call. Say anything and I will answer, or say goodbye.'))
+    # The call must be placed by the running companion: it owns the bridge that answers Twilio.
+    port=os.environ.get('VOICE_PORT','4321')
+    request=Request(f'http://127.0.0.1:{port}/api/phone/call',data=b'{}',headers={'Content-Type':'application/json','X-Voice-Client':'1'})
+    try:
+        with urlopen(request,timeout=30) as response:print('✅',json.load(response))
+    except Exception as error:
+        detail=getattr(error,'read',lambda:b'')().decode(errors='replace')
+        raise SystemExit(f'❌ Jarvis could not place the call: {error} {detail}'.strip())
 
 def restart(_):
     subprocess.run(['launchctl','kickstart','-k',f'gui/{os.getuid()}/{LABEL}'],check=True)
