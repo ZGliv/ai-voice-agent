@@ -37,6 +37,12 @@ def signature(token,url,params):
     payload=url+''.join(k+v for k,v in sorted(params.items()))
     return base64.b64encode(hmac.new(token.encode(),payload.encode(),hashlib.sha1).digest()).decode()
 
+def valid(token,url,params,given):
+    # Twilio signs a URL on a non-default port either with or without the port; its own libraries accept both.
+    parts=urlparse(url)
+    bare=parts._replace(netloc=parts.hostname or '').geturl()
+    return any(hmac.compare_digest(signature(token,candidate,params),given) for candidate in {url,bare})
+
 def twiml(body):
     return '<?xml version="1.0" encoding="UTF-8"?><Response>'+body+'</Response>'
 
@@ -122,8 +128,7 @@ class Bridge(BaseHTTPRequestHandler):
         if not 0<=size<=20000:return self.reply(400,'Bad request','text/plain')
         params={k:v[0] for k,v in parse_qs(self.rfile.read(size).decode(),keep_blank_values=True).items()}
         base=settings['public_url'].rstrip('/')
-        expected=signature(settings['auth_token'],base+self.path,params)
-        if not hmac.compare_digest(expected,self.headers.get('X-Twilio-Signature','')):
+        if not valid(settings['auth_token'],base+self.path,params,self.headers.get('X-Twilio-Signature','')):
             return self.reply(403,'Forbidden','text/plain')
         path=urlparse(self.path).path;query=parse_qs(urlparse(self.path).query)
         sid=params.get('CallSid','')

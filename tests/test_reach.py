@@ -111,6 +111,14 @@ class PhoneTests(unittest.TestCase):
   self.post('/twilio/voice',{'CallSid':'CA3','From':'+15552223333','Direction':'inbound'})
   self.assertIn('<Hangup/>',self.post('/twilio/heard',{'CallSid':'CA3','SpeechResult':'Goodbye.'})[1])
 
+ def test_signature_signed_without_port_is_accepted(self):
+  params={'CallSid':'CA4','From':'+15552223333','Direction':'inbound'}
+  conn=HTTPConnection('127.0.0.1',self.server.server_port,timeout=5)
+  conn.request('POST','/twilio/voice',urlencode(params),{'Content-Type':'application/x-www-form-urlencoded',
+   'X-Twilio-Signature':phone.signature('tok','https://jarvis.example.ts.net/twilio/voice',params)})
+  self.assertIn('<Gather',conn.getresponse().read().decode())
+  self.assertFalse(phone.valid('tok','https://jarvis.example.ts.net:10000/twilio/voice',params,'forged'))
+
  def test_signature_matches_twilio_reference_example(self):
   # Example from Twilio's request-validation documentation.
   params={'CallSid':'CA1234567890ABCDE','Caller':'+12349013030','Digits':'1234','From':'+12349013030','To':'+18005551212'}
