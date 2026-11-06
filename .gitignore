@@ -7,3 +7,7 @@ __pycache__/
 output/
 .playwright-cli/
 .vercel
+
+.venv/
+
+.venv-kyutai/

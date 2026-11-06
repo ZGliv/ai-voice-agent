@@ -1,0 +1,3 @@
+import test from 'node:test';import assert from 'node:assert/strict';import {reportLinks} from '../src/report-links.js';
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+test('report links escape source markup and permit only http links',()=>{const html=reportLinks('<script>alert(1)</script> [source](https://example.org/docs). javascript:alert(1)',esc);assert.ok(html.includes('&lt;script&gt;'));assert.ok(html.includes('href="https://example.org/docs"'));assert.ok(!html.includes('href="javascript:'));assert.ok(!html.includes('<script>'));});

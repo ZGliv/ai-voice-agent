@@ -13,3 +13,9 @@ Real runtime components:
 - FFmpeg installed locally for decoding input audio. Three.js 0.154.0 (MIT), Vite 8.3.4 (MIT).
 
 No macOS system voice recordings were used. All test audio is generated from the clearly labeled synthetic prompt using Piper / LJ Speech. No real personal microphone recording was made by the agent.
+
+## British voice added October 29, 2026
+The active local voice is Piper en_GB-alan-medium, downloaded from rhasspy/piper-voices (en/en_GB/alan/medium). Its MODEL_CARD, ONNX and JSON files are stored under ~/.local/share/ai-voice-agent/models and excluded from source packages. Model card: https://huggingface.co/rhasspy/piper-voices/blob/main/en/en_GB/alan/medium/MODEL_CARD . This is a stock British voice with an original Jarvis-style conversational prompt, not an actor voice clone.
+
+
+November 1, 2026: `kyutai_worker.py` follows Kyutai's official [MLX microphone example](https://github.com/kyutai-labs/delayed-streams-modeling/blob/main/scripts/stt_from_mic_mlx.py) (MIT source repository), using its semantic VAD head and cached [STT 1B weights](https://huggingface.co/kyutai/stt-1b-en_fr-candle). The separate experimental benchmark uses [Moshiko MLX q4](https://huggingface.co/kyutai/moshiko-mlx-q4) through [moshi-mlx](https://github.com/kyutai-labs/moshi/tree/main/moshi_mlx). Model weights retain their upstream licenses; no weights are bundled in the source archive. Moshi benchmark user input was synthesized with macOS Samantha and is explicitly a fixture. The current configured Fish voice is unchanged; the historical Piper attribution above describes the fallback, not the selected production voice.
