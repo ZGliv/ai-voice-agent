@@ -255,7 +255,7 @@ class Call:
             except queue.Empty:continue
             if len(buffer)<CHUNK:continue
             pcm,buffer=buffer[:CHUNK],buffer[CHUNK:]
-            try:result=recognizer.call({'session':session,'pcm':base64.b64encode(pcm).decode(),'end_quiet':4},stop,10)
+            try:result=recognizer.call({'session':session,'pcm':base64.b64encode(pcm).decode()},stop,10)
             except Exception as error:result={'error':True};log('recognition failed:',type(error).__name__)
             samples+=CHUNK//2
             if result.get('error') or samples>24000*55:
