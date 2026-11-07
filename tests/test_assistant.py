@@ -123,4 +123,22 @@ class HandoffGuardTests(unittest.TestCase):
   self.assertNotIn('Stark',done['output_text']);self.assertIn('checking',done['output_text'])
   self.assertTrue(done['timings']['handoff_guard'])
 
+ def test_handoff_plays_a_prerendered_acknowledgement(self):
+  import wave
+  clip=c.DATA/'ack.wav'
+  with wave.open(str(clip),'wb') as w:w.setparams((1,2,24000,0,'NONE','not compressed'));w.writeframes(b'\x10\x10'*4800)
+  with patch.object(c,'launch'):item=c.create_turn('a'*32,text="What's on my calendar tomorrow?")
+  route={'role':'assistant','content':'','tool_calls':[{'id':'1','function':{'name':'delegate_task','arguments':{'task':'Check the calendar'}}}]}
+  replies=iter([{'role':'assistant','content':'TOOLS'},route,{'role':'assistant','content':'','tool_calls':[{'id':'2','function':{'name':'speak_response','arguments':{}}}]}])
+  made=[]
+  with patch('fish_voice.key',return_value='k'),patch('fish_text_stream.available',return_value=True),\
+       patch('fish_text_stream.TextSpeech',side_effect=lambda *a,**k:made.append(1) or type('S',(),{'feed':lambda s,t:None,'finish':lambda s,t:None,'close':lambda s:None,'wait':lambda s:{}})()),\
+       patch('brain.chat',side_effect=lambda *a,**k:next(replies)),patch('phone.cached',return_value=clip),\
+       patch('assistant_jobs.delegate',return_value={'id':'j'*32,'task':'x','status':'preparing'}):
+   c.CURRENT=item['id'];c.work(item['id'])
+  done=c.turn(item['id'])
+  self.assertEqual(done['status'],'complete');self.assertIn(done['output_text'],c.HANDOFF_ACKS)
+  self.assertEqual(done['timings']['speech_detail']['mode'],'cached')
+  self.assertTrue((c.DATA/'turns'/item['id']/'reply.wav').is_file())
+
 if __name__=='__main__':unittest.main()

@@ -22,8 +22,8 @@ PENDING={}    # one-time stream token -> {'conversation','opening','expires'}
 LIVE={}       # conversation id -> Call
 LOCK=threading.Lock()
 GOODBYE=re.compile(r"\W*(?:(?:ok(?:ay)?,? )?(?:good)?bye(?: now)?|that'?s all|hang up|(?:thanks|thank you),? (?:good)?bye)(?:,? jarvis)?\W*",re.I)
-LINES=['Yes, sir?','Bear with me, sir. I am still waking up.','One moment, sir.','Very good, sir.','I shall leave you to it, sir.','I could not finish that one, sir. Please try again.']
-HOLD_AFTER=3.0   # seconds after Zack stops talking before "One moment, sir."
+LINES=['Yes, sir?','Bear with me. I am still waking up.','Bear with me.','Very good, sir.','I shall leave you to it.','I could not finish that one. Please try again.']
+HOLD_AFTER=7.0   # only a genuinely slow reply earns "Bear with me."
 IDLE_LIMIT=60    # seconds of nobody talking before Jarvis hangs up
 CHUNK=3840       # 80 ms of 24 kHz PCM16 per recognition step (one Kyutai frame)
 
@@ -70,6 +70,17 @@ def spoken(core,text):
         fish_voice.synthesize(text,pending,secret,threading.Event())
         pending.replace(path)
     return path
+
+def cached(core,text):
+    """The pre-rendered clip for a fixed line, or None if it has not been made yet."""
+    path=core.DATA/'phone'/(hashlib.sha256((fish_voice.MODEL+text).encode()).hexdigest()[:24]+'.wav')
+    return path if fish_voice.key(core.DATA) and path.is_file() else None
+
+def warm(core,lines):
+    # Fixed lines are synthesized once so they play instantly later.
+    for line in lines:
+        try:spoken(core,line)
+        except Exception:pass
 
 def new_conversation(core,title,opening=None):
     now=time.time();cid=uuid.uuid4().hex
@@ -167,7 +178,7 @@ class Call:
         while time.monotonic()<deadline and generation==self.generation:
             item=core.turn(tid)
             if item['status'] in {'failed','cancelled','interrupted','unheard'}:
-                if generation==self.generation:self.say_line('I could not finish that one, sir. Please try again.',generation)
+                if generation==self.generation:self.say_line('I could not finish that one. Please try again.',generation)
                 return
             path=directory/('reply.wav' if item['status']=='complete' else 'reply.pcm')
             chunk=b''
@@ -181,7 +192,7 @@ class Call:
                 offset+=len(chunk);self.send_pcm(chunk,downsampler);continue
             if item['status']=='complete':break
             if not held and not offset and time.monotonic()-started>HOLD_AFTER:
-                held=True;self.say_line('One moment, sir.',generation)
+                held=True;self.say_line('Bear with me.',generation)
             time.sleep(.04)
         if generation==self.generation:self.mark()
 
@@ -230,7 +241,7 @@ class Call:
                     try:text=self.lines.get_nowait()
                     except queue.Empty:
                         if time.monotonic()-self.heard>IDLE_LIMIT*(3 if self.waiting() else 1):
-                            self.say_line('I shall leave you to it, sir.');self.hang_up(after_playback=True)
+                            self.say_line('I shall leave you to it.');self.hang_up(after_playback=True)
                         continue
                     self.busy=True
                     try:self.speak_text(text)
@@ -284,7 +295,7 @@ class Call:
             if not self.core.STREAMING.ready:
                 # Right after a restart the recognition model is still loading.
                 log('recognition still loading')
-                self.say_line('Bear with me, sir. I am still waking up.')
+                self.say_line('Bear with me. I am still waking up.')
             upsampler=Upsampler()
             while not self.done.is_set():
                 message=self.socket.receive()
@@ -357,11 +368,6 @@ def start(core):
     if not ready(core.DATA):return None
     Bridge.core=core
     server=ThreadingHTTPServer(('127.0.0.1',PORT),Bridge)
-    def warm():
-        # Fixed lines are synthesized once so the first call has no extra pause.
-        for line in LINES:
-            try:spoken(core,line)
-            except Exception:pass
-    threading.Thread(target=warm,daemon=True).start()
+    threading.Thread(target=warm,args=(core,LINES),daemon=True).start()
     threading.Thread(target=server.serve_forever,daemon=True).start()
     return server

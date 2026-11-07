@@ -161,8 +161,8 @@ class CompanionTests(unittest.TestCase):
         with patch.object(c.fish_voice,'key',return_value='fake'),patch.object(c.fish_text_stream,'available',return_value=True),patch.object(c.fish_text_stream,'TextSpeech',Speech),patch.object(c.local_runtime,'chat',side_effect=chat) as model,patch.object(c.companion_tools,'execute') as action:
             c.work(t['id'])
         model.assert_called_once();action.assert_not_called()
-        self.assertEqual(heard,['Sir, Hello there. ','Sir, Hello there. How can I help?'])
-        self.assertEqual(c.turn(t['id'])['output_text'],'Sir, Hello there. How can I help?')
+        self.assertEqual(heard,['Hello there. ','Hello there. How can I help?'])
+        self.assertEqual(c.turn(t['id'])['output_text'],'Hello there. How can I help?')
         self.assertEqual(c.turn(t['id'])['status'],'complete')
 
     def test_action_and_memory_requests_bypass_conversational_shortcut(self):
@@ -194,9 +194,8 @@ class RoutingRegressionTests(unittest.TestCase):
   self.assertTrue(c.needs_tools('Please pause listening'))
   self.assertTrue(c.needs_tools('Pause the conversation'))
 
- def test_spoken_address_is_present_and_stream_prefix_is_stable(self):
-  self.assertEqual(c.addressed_reply('S'),'')
-  self.assertEqual(c.addressed_reply('Sir,'),'')
-  self.assertEqual(c.addressed_reply('Sir, hello'),'Sir, hello')
-  self.assertEqual(c.addressed_reply('Hello'),'Sir, Hello')
-  self.assertTrue(c.addressed_reply('Hello there').startswith(c.addressed_reply('Hello')))
+ def test_no_address_is_forced_and_stream_prefix_is_stable(self):
+  self.assertEqual(c.spoken_reply('  Hello'),'Hello')
+  self.assertEqual(c.spoken_reply('Sir, hello'),'Sir, hello')
+  self.assertTrue(c.spoken_reply('Hello there').startswith(c.spoken_reply('Hello')))
+  self.assertNotIn('Begin every spoken reply with Sir',c.companion_tools.PERSONALITY)
