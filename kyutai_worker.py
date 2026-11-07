@@ -35,6 +35,8 @@ for line in sys.stdin:
    if token not in (0,3):
     text+=tokenizer.id_to_piece(token).replace('▁',' ');last_text_step=gen.step_idx
    high=high+1 if prob>=.65 else 0;samples+=1920
-  print(json.dumps({'text':text.strip(),'end':high>=3 and gen.step_idx-last_text_step>=6 and bool(text.strip()),'probability':prob,'samples':samples,'processing_ms':round((time.monotonic()-started)*1000,1)}),flush=True)
+  # Callers may tighten end-of-turn detection (phone calls); defaults suit the microphone.
+  need_high=min(6,max(2,int(request.get('end_high',3))));need_quiet=min(12,max(3,int(request.get('end_quiet',6))))
+  print(json.dumps({'text':text.strip(),'end':high>=need_high and gen.step_idx-last_text_step>=need_quiet and bool(text.strip()),'probability':prob,'samples':samples,'processing_ms':round((time.monotonic()-started)*1000,1)}),flush=True)
  except Exception:
   session=None;print(json.dumps({'error':'Streaming recognition failed. Reconnect the microphone.'}),flush=True)

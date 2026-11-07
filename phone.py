@@ -9,7 +9,7 @@ while it is still being generated. Each media stream must present a one-time tok
 was only ever handed to Twilio. Config: DATA/twilio.json
   {"account_sid","auth_token","from_number","my_number","public_url"}
 """
-import base64, hashlib, hmac, json, os, queue, re, secrets, threading, time, uuid, wave
+import base64, hashlib, hmac, json, os, queue, re, secrets, sys, threading, time, traceback, uuid, wave
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlencode, urlparse
 from urllib.request import Request, urlopen
@@ -22,10 +22,14 @@ PENDING={}    # one-time stream token -> {'conversation','opening','expires'}
 LIVE={}       # conversation id -> Call
 LOCK=threading.Lock()
 GOODBYE=re.compile(r"\W*(?:(?:ok(?:ay)?,? )?(?:good)?bye(?: now)?|that'?s all|hang up|(?:thanks|thank you),? (?:good)?bye)(?:,? jarvis)?\W*",re.I)
-LINES=['Yes, sir?','One moment, sir.','Very good, sir.','I shall leave you to it, sir.','I could not finish that one, sir. Please try again.']
+LINES=['Yes, sir?','Bear with me, sir. I am still waking up.','One moment, sir.','Very good, sir.','I shall leave you to it, sir.','I could not finish that one, sir. Please try again.']
 HOLD_AFTER=3.0   # seconds after Zack stops talking before "One moment, sir."
 IDLE_LIMIT=60    # seconds of nobody talking before Jarvis hangs up
-CHUNK=7680       # 160 ms of 24 kHz PCM16 per recognition step
+CHUNK=3840       # 80 ms of 24 kHz PCM16 per recognition step (one Kyutai frame)
+
+def log(*parts):
+    # Goes to the service's error log; never includes audio, tokens or secrets.
+    print(time.strftime('%H:%M:%S'),'phone:',*parts,file=sys.stderr,flush=True)
 
 def config(data):
     try:value=json.loads((data/'twilio.json').read_text())
@@ -212,6 +216,11 @@ class Call:
         finally:target.unlink(missing_ok=True)
         self.mark()
 
+    def waiting(self):
+        # A task Zack asked for on this call is still running; stay on the line for its answer.
+        with self.core.connect() as db:
+            return bool(db.execute("SELECT 1 FROM codex_jobs j JOIN turns t ON t.id=j.source_turn_id WHERE t.conversation_id=? AND j.status IN ('preparing','running') LIMIT 1",(self.conversation,)).fetchone())
+
     def worker(self):
         """Answers and announcements, one at a time, so replies never overlap."""
         while not self.done.is_set():
@@ -220,7 +229,7 @@ class Call:
                 if not self.busy and not self.speaking():
                     try:text=self.lines.get_nowait()
                     except queue.Empty:
-                        if time.monotonic()-self.heard>IDLE_LIMIT:
+                        if time.monotonic()-self.heard>IDLE_LIMIT*(3 if self.waiting() else 1):
                             self.say_line('I shall leave you to it, sir.');self.hang_up(after_playback=True)
                         continue
                     self.busy=True
@@ -232,6 +241,7 @@ class Call:
             try:self.answer(value)
             except Closed:return
             except Exception:
+                log('answer failed\n'+traceback.format_exc())
                 try:self.say_line('Something went wrong on my end, sir.')
                 except Exception:pass
             finally:self.busy=False;self.heard=time.monotonic()
@@ -245,8 +255,8 @@ class Call:
             except queue.Empty:continue
             if len(buffer)<CHUNK:continue
             pcm,buffer=buffer[:CHUNK],buffer[CHUNK:]
-            try:result=recognizer.call({'session':session,'pcm':base64.b64encode(pcm).decode()},stop,10)
-            except Exception:result={'error':True}
+            try:result=recognizer.call({'session':session,'pcm':base64.b64encode(pcm).decode(),'end_quiet':4},stop,10)
+            except Exception as error:result={'error':True};log('recognition failed:',type(error).__name__)
             samples+=CHUNK//2
             if result.get('error') or samples>24000*55:
                 session=uuid.uuid4().hex;samples=0;last='';continue
@@ -256,6 +266,7 @@ class Call:
                 # Zack talking over Jarvis stops the reply, like a person would.
                 if self.speaking() and len(text.split())>=2:self.interrupt()
             if result.get('end') and text:
+                log('heard',len(text.split()),'words; backlog',self.audio.qsize())
                 session=uuid.uuid4().hex;samples=0;last=''
                 self.pending.put(('answer',text))
 
@@ -270,6 +281,10 @@ class Call:
         for thread in threads:thread.start()
         try:
             if opening:self.play_wav(opening)
+            if not self.core.STREAMING.ready:
+                # Right after a restart the recognition model is still loading.
+                log('recognition still loading')
+                self.say_line('Bear with me, sir. I am still waking up.')
             upsampler=Upsampler()
             while not self.done.is_set():
                 message=self.socket.receive()
@@ -280,7 +295,7 @@ class Call:
                 elif event=='mark':
                     try:self.played=max(self.played,int(message['mark']['name']))
                     except (KeyError,ValueError):pass
-                elif event=='stop':break
+                elif event=='stop':log('caller hung up');break
         except Closed:pass
         finally:
             self.done.set()
@@ -301,6 +316,7 @@ class Bridge(BaseHTTPRequestHandler):
         except (BrokenPipeError,ConnectionResetError):pass
 
     def do_GET(self):
+        log('GET',urlparse(self.path).path,'upgrade=',self.headers.get('Upgrade'),'key=',bool(self.headers.get('Sec-WebSocket-Key')))
         if urlparse(self.path).path!='/twilio/media' or self.headers.get('Upgrade','').lower()!='websocket' or not self.headers.get('Sec-WebSocket-Key'):
             return self.reply(404,'Not found','text/plain')
         if not config(self.core.DATA):return self.reply(503,'Not configured','text/plain')
@@ -315,10 +331,12 @@ class Bridge(BaseHTTPRequestHandler):
                 if message.get('event')=='start':break
             token=(message.get('start',{}).get('customParameters') or {}).get('token','')
             with LOCK:state=PENDING.pop(token,None)
-            if not state or state['expires']<time.time():return socket.close()
+            if not state or state['expires']<time.time():log('stream refused: unknown or expired token');return socket.close()
+            log('stream started',message.get('streamSid'))
             self.connection.settimeout(30)
             Call(self.core,socket,message.get('streamSid') or message['start'].get('streamSid'),state['conversation']).run(state['opening'])
-        except (Closed,OSError,KeyError,ValueError):pass
+        except Closed:log('stream closed')
+        except Exception:log('stream failed\n'+traceback.format_exc())
         finally:socket.close()
 
     def do_POST(self):
