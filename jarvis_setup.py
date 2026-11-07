@@ -8,6 +8,8 @@ saved owner-only in the private data directory; nothing is written to the reposi
   python3 jarvis_setup.py telegram-test
   python3 jarvis_setup.py twilio
   python3 jarvis_setup.py call-test
+  python3 jarvis_setup.py deepgram
+  python3 jarvis_setup.py stripe
   python3 jarvis_setup.py restart
 """
 import argparse, base64, getpass, json, os, subprocess, sys, threading, time
@@ -43,6 +45,8 @@ def status(_):
     print(f"{ok(notify.ready(DATA))} Telegram: {'reusing Claude Code Telegram bot' if notify.ready(DATA) and not (DATA/'telegram.json').exists() else 'configured' if notify.ready(DATA) else 'not configured'}")
     settings=phone.config(DATA)
     print(f"{ok(settings)} Phone: "+(f"{settings['from_number']} → {settings['my_number']} via {settings['public_url']}" if settings else 'not configured → run: python3 jarvis_setup.py twilio'))
+    print(f"{ok(phone.hearing_key(DATA))} Phone hearing: "+('Deepgram Flux' if phone.hearing_key(DATA) else 'local Kyutai  → better: python3 jarvis_setup.py deepgram'))
+    print(f"{ok(phone.stripe_secret(DATA))} Parl.ai sales: "+(f"Stripe → {settings['public_url'] if settings else '?'}/stripe/webhook" if phone.stripe_secret(DATA) else 'not connected → python3 jarvis_setup.py stripe'))
     import sqlite3
     try:
         db=sqlite3.connect(DATA/'history.sqlite3')
@@ -134,6 +138,37 @@ def call_test(_):
         detail=getattr(error,'read',lambda:b'')().decode(errors='replace')
         raise SystemExit(f'❌ Jarvis could not place the call: {error} {detail}'.strip())
 
+def save_secret(name,value):
+    DATA.mkdir(parents=True,exist_ok=True,mode=0o700)
+    path=DATA/name;path.write_text(value);os.chmod(path,0o600)
+
+def deepgram(_):
+    print('From console.deepgram.com → API Keys → Create a key (Member role is enough).')
+    secret=ask_secret('Deepgram API key','DEEPGRAM_API_KEY')
+    if not secret:raise SystemExit('No key entered.')
+    import phone_media
+    from urllib.parse import urlencode
+    try:
+        ws=phone_media.connect(phone.FLUX+'?'+urlencode({'model':'flux-general-en','encoding':'mulaw','sample_rate':'8000'}),{'Authorization':'Token '+secret})
+        ws.send_bytes(bytes([0xFF])*phone.FLUX_CHUNK);ws.send({'type':'CloseStream'});ws.close()
+    except Exception as error:raise SystemExit(f'❌ Deepgram refused that key: {error}\nNothing was saved.')
+    save_secret('deepgram-api-key',secret)
+    print('✅ Saved. Phone calls use Deepgram from the next call (no restart needed).')
+
+def stripe(_):
+    settings=phone.config(DATA)
+    if not settings:raise SystemExit('Set up the phone first: python3 jarvis_setup.py twilio')
+    url=settings['public_url']+'/stripe/webhook'
+    print('In Stripe (dashboard.stripe.com → Developers → Webhooks → Add endpoint):')
+    print(f'   Endpoint URL: {url}')
+    print('   Events: checkout.session.completed, customer.subscription.deleted, invoice.payment_failed')
+    print('Then open the endpoint, reveal its "Signing secret" (starts with whsec_) and paste it here.')
+    secret=ask_secret('Stripe signing secret')
+    if not secret.startswith('whsec_'):raise SystemExit('That does not look like a signing secret (whsec_…). Nothing was saved.')
+    save_secret('stripe-webhook-secret',secret)
+    print('✅ Saved. New sales ring you between 8am and 10pm; cancellations and failed payments go to Telegram.')
+    print('   Test it: in Stripe, open the endpoint → Send test event → checkout.session.completed.')
+
 def busy():
     # A restart kills live calls and running assistant tasks; never do that by accident.
     reasons=[]
@@ -165,5 +200,7 @@ if __name__=='__main__':
     sub.add_parser('telegram-test').set_defaults(run=telegram_test)
     sub.add_parser('twilio').set_defaults(run=twilio)
     sub.add_parser('call-test').set_defaults(run=call_test)
+    sub.add_parser('deepgram').set_defaults(run=deepgram)
+    sub.add_parser('stripe').set_defaults(run=stripe)
     r=sub.add_parser('restart');r.add_argument('--force',action='store_true');r.set_defaults(run=restart)
     args=parser.parse_args();args.run(args)

@@ -3,18 +3,23 @@
 A separate loopback server (VOICE_PHONE_PORT, default 4324) exposes only /twilio/*. It is
 published with Tailscale Funnel; the main companion stays private. The one webhook must
 carry a valid X-Twilio-Signature and only Zack's own number may call in. The call audio
-then flows both ways over a WebSocket: Kyutai hears Zack live and decides when he has
-finished, the companion answers as a normal turn, and the Fish reply is streamed back
+then flows both ways over a WebSocket: Deepgram Flux (built for phone audio; key in
+DATA/deepgram-api-key) hears Zack and decides when he has finished, with the local Kyutai
+model as the fallback, the companion answers as a normal turn, and the Fish reply is streamed back
 while it is still being generated. Each media stream must present a one-time token that
 was only ever handed to Twilio. Config: DATA/twilio.json
   {"account_sid","auth_token","from_number","my_number","public_url"}
+The same bridge accepts Stripe webhooks at /stripe/webhook (signed with DATA/stripe-webhook-secret)
+so a new Parl.ai sale rings Zack.
 """
 import base64, hashlib, hmac, json, os, queue, re, secrets, sys, threading, time, traceback, uuid, wave
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlencode, urlparse
 from urllib.request import Request, urlopen
 from xml.sax.saxutils import escape, quoteattr
 import fish_voice
+import phone_media
 from phone_media import Closed, Downsampler, Socket, Upsampler, accept_key
 
 PORT=int(os.environ.get('VOICE_PHONE_PORT','4324'))
@@ -26,6 +31,14 @@ LINES=['Yes, sir?','Bear with me. I am still waking up.','Bear with me.','Very g
 HOLD_AFTER=7.0   # only a genuinely slow reply earns "Bear with me."
 IDLE_LIMIT=60    # seconds of nobody talking before Jarvis hangs up
 CHUNK=3840       # 80 ms of 24 kHz PCM16 per recognition step (one Kyutai frame)
+FLUX='wss://api.deepgram.com/v2/listen'
+FLUX_CHUNK=640   # 80 ms of 8 kHz mu-law, Deepgram's recommended frame
+# Said on a live call while a lookup works, so a long search is never dead air.
+PROGRESS={'gmail':'Going through your inbox now.','notion':'Checking your Notion.','calendar':'Looking at your calendar.',
+  'drive':'Searching your Drive.','supabase':'Checking the database.','vercel':'Checking Vercel.','web':'Having a look online.'}
+PROGRESS_GAP=5.0 # seconds of Jarvis silence before a progress line is worth saying
+WAKING=(8,22)    # proactive calls only ring between these hours; otherwise Telegram
+SEEN_EVENTS=set()
 
 def log(*parts):
     # Goes to the service's error log; never includes audio, tokens or secrets.
@@ -128,6 +141,21 @@ def deliver(core,text,conversation=None):
     if live:live.announce(text);return 'spoken'
     call(core,text,conversation);return 'called'
 
+def hearing_key(data):
+    if os.environ.get('DEEPGRAM_API_KEY'):return os.environ['DEEPGRAM_API_KEY'].strip()
+    try:return (data/'deepgram-api-key').read_text().strip() or None
+    except OSError:return None
+
+def awake_hours(now=None):
+    return WAKING[0]<=(now or datetime.now()).hour<WAKING[1]
+
+def progress(core,conversation,tool):
+    """A lookup from this call used `tool`; say what Jarvis is doing if he has been quiet a while."""
+    with LOCK:live=LIVE.get(conversation)
+    name=tool.lower()
+    line=next((text for key,text in PROGRESS.items() if key in name),None)
+    if live and line:live.update(line)
+
 def is_phone_conversation(core,conversation):
     with core.connect() as db:
         row=db.execute('SELECT title FROM conversations WHERE id=?',(conversation,)).fetchone()
@@ -140,6 +168,7 @@ class Call:
         self.audio=queue.Queue(maxsize=400);self.lines=queue.Queue();self.pending=queue.Queue()
         self.generation=0;self.marks=0;self.played=0;self.sending=False;self.turn=None;self.busy=False
         self.heard=time.monotonic();self.done=threading.Event();self.lock=threading.Lock()
+        self.last_spoke=time.monotonic();self.said=set()
 
     # Outgoing audio
     def send_pcm(self,pcm,downsampler):
@@ -149,7 +178,7 @@ class Call:
     def mark(self):
         with self.lock:self.marks+=1;name=str(self.marks)
         self.socket.send({'event':'mark','streamSid':self.stream,'mark':{'name':name}})
-        self.sending=False
+        self.sending=False;self.last_spoke=time.monotonic()
     def speaking(self):
         # Audio is still being sent, or Twilio has not yet played up to our last mark.
         return self.sending or self.played<self.marks
@@ -200,7 +229,7 @@ class Call:
         core=self.core
         if GOODBYE.fullmatch(text):
             self.say_line('Very good, sir.');self.hang_up(after_playback=True);return
-        with self.lock:self.generation+=1;generation=self.generation
+        with self.lock:self.generation+=1;generation=self.generation;self.said.clear()
         # A barge-in may still be cancelling the previous reply.
         for _ in range(100):
             if not core.CURRENT:break
@@ -216,6 +245,12 @@ class Call:
 
     def announce(self,text):
         self.lines.put(text)
+
+    def update(self,line):
+        # Progress lines are optional: never repeat one, never talk over anything, never crowd the last line.
+        if line in self.said or self.busy or self.speaking() or not self.lines.empty():return
+        if time.monotonic()-self.last_spoke<PROGRESS_GAP:return
+        self.said.add(line);self.lines.put(line)
 
     def speak_text(self,text):
         """Speak an arbitrary line (e.g. a finished task) streamed straight from Fish."""
@@ -244,7 +279,10 @@ class Call:
                             self.say_line('I shall leave you to it.');self.hang_up(after_playback=True)
                         continue
                     self.busy=True
-                    try:self.speak_text(text)
+                    try:
+                        clip=cached(self.core,text)
+                        if clip:self.play_wav(clip)
+                        else:self.speak_text(text)
                     except Exception:pass
                     finally:self.busy=False;self.heard=time.monotonic()
                 continue
@@ -258,11 +296,69 @@ class Call:
             finally:self.busy=False;self.heard=time.monotonic()
 
     # Listening
+    def heard_words(self,text,last):
+        """Partial transcript bookkeeping shared by both recognizers; returns the new `last`."""
+        if text and text!=last:
+            self.heard=time.monotonic()
+            # Zack talking over Jarvis stops the reply, like a person would.
+            if self.speaking() and len(text.split())>=2:self.interrupt()
+        return text or last
+
     def listen(self):
-        recognizer=self.core.STREAMING.worker;stop=threading.Event()
+        secret=hearing_key(self.core.DATA)
+        if secret:
+            try:
+                if self.listen_flux(secret):return
+            except Exception as error:log('deepgram failed, using local recognition:',type(error).__name__,str(error)[:120])
+        self.listen_local()
+
+    def listen_flux(self,secret):
+        """Deepgram Flux: phone-band audio in as-is, its own end-of-turn decision out. False = fall back."""
+        query=urlencode({'model':'flux-general-en','encoding':'mulaw','sample_rate':'8000','eot_threshold':'0.7','eot_timeout_ms':'4000'})
+        ws=phone_media.connect(FLUX+'?'+query,{'Authorization':'Token '+secret})
+        log('listening with deepgram')
+        failed=threading.Event()
+        def read():
+            last=''
+            try:
+                while not self.done.is_set():
+                    message=ws.receive()
+                    if message.get('type')=='Error':log('deepgram error:',str(message.get('description') or message)[:160]);break
+                    event=message.get('event')
+                    if not event:continue
+                    text=(message.get('transcript') or '').strip()
+                    if event=='EndOfTurn':
+                        last=''
+                        if text:
+                            log('heard',len(text.split()),'words via deepgram')
+                            self.pending.put(('answer',text))
+                    else:last=self.heard_words(text,last)
+            except Closed:pass
+            except Exception:log('deepgram reader failed\n'+traceback.format_exc())
+            if not self.done.is_set():failed.set()
+        reader=threading.Thread(target=read,daemon=True);reader.start()
+        buffer=b''
+        try:
+            while not self.done.is_set() and not failed.is_set():
+                try:buffer+=self.audio.get(timeout=.2)
+                except queue.Empty:continue
+                while len(buffer)>=FLUX_CHUNK:
+                    ws.send_bytes(buffer[:FLUX_CHUNK]);buffer=buffer[FLUX_CHUNK:]
+        except Closed:failed.set()
+        finally:
+            try:ws.send({'type':'CloseStream'})
+            except Closed:pass
+            ws.close()
+        if failed.is_set() and not self.done.is_set():
+            log('deepgram stream dropped mid-call; switching to local recognition')
+            return False
+        return True
+
+    def listen_local(self):
+        recognizer=self.core.STREAMING.worker;stop=threading.Event();upsampler=Upsampler()
         session=uuid.uuid4().hex;buffer=b'';samples=0;last=''
         while not self.done.is_set():
-            try:buffer+=self.audio.get(timeout=.2)
+            try:buffer+=upsampler.process(self.audio.get(timeout=.2))
             except queue.Empty:continue
             if len(buffer)<CHUNK:continue
             pcm,buffer=buffer[:CHUNK],buffer[CHUNK:]
@@ -272,10 +368,7 @@ class Call:
             if result.get('error') or samples>24000*55:
                 session=uuid.uuid4().hex;samples=0;last='';continue
             text=(result.get('text') or '').strip()
-            if text and text!=last:
-                last=text;self.heard=time.monotonic()
-                # Zack talking over Jarvis stops the reply, like a person would.
-                if self.speaking() and len(text.split())>=2:self.interrupt()
+            last=self.heard_words(text,last)
             if result.get('end') and text:
                 log('heard',len(text.split()),'words; backlog',self.audio.qsize())
                 session=uuid.uuid4().hex;samples=0;last=''
@@ -292,16 +385,16 @@ class Call:
         for thread in threads:thread.start()
         try:
             if opening:self.play_wav(opening)
-            if not self.core.STREAMING.ready:
+            if not hearing_key(self.core.DATA) and not self.core.STREAMING.ready:
                 # Right after a restart the recognition model is still loading.
                 log('recognition still loading')
                 self.say_line('Bear with me. I am still waking up.')
-            upsampler=Upsampler()
             while not self.done.is_set():
                 message=self.socket.receive()
                 event=message.get('event')
                 if event=='media':
-                    try:self.audio.put_nowait(upsampler.process(base64.b64decode(message['media']['payload'])))
+                    # Raw 8 kHz mu-law; each recognizer converts what it needs.
+                    try:self.audio.put_nowait(base64.b64decode(message['media']['payload']))
                     except queue.Full:pass
                 elif event=='mark':
                     try:self.played=max(self.played,int(message['mark']['name']))
@@ -351,7 +444,9 @@ class Bridge(BaseHTTPRequestHandler):
         finally:socket.close()
 
     def do_POST(self):
-        core=self.core;settings=config(core.DATA)
+        core=self.core
+        if urlparse(self.path).path=='/stripe/webhook':return self.stripe()
+        settings=config(core.DATA)
         if not settings:return self.reply(503,twiml(say('Phone access is not configured.')))
         try:size=int(self.headers.get('Content-Length','0'))
         except ValueError:size=-1
@@ -364,10 +459,70 @@ class Bridge(BaseHTTPRequestHandler):
         try:return self.reply(200,stream_twiml(core,settings,new_conversation(core,'Phone call'),'Yes, sir?'))
         except Exception:return self.reply(200,twiml(say('Something went wrong on my end, sir.')))
 
+    def stripe(self):
+        secret=stripe_secret(self.core.DATA)
+        try:size=int(self.headers.get('Content-Length','0'))
+        except ValueError:size=-1
+        if not secret:return self.reply(404,'Not found','text/plain')
+        if not 0<=size<=512000:return self.reply(400,'Bad request','text/plain')
+        body=self.rfile.read(size)
+        if not stripe_valid(secret,body,self.headers.get('Stripe-Signature','')):return self.reply(400,'Bad signature','text/plain')
+        try:event=json.loads(body)
+        except ValueError:return self.reply(400,'Bad request','text/plain')
+        self.reply(200,'{"received":true}','application/json')
+        threading.Thread(target=stripe_event,args=(self.core,event),daemon=True).start()
+
+def stripe_secret(data):
+    try:return (data/'stripe-webhook-secret').read_text().strip() or None
+    except OSError:return None
+
+def stripe_valid(secret,body,header,now=None,tolerance=300):
+    """Stripe's scheme: HMAC-SHA256 of "<t>.<raw body>", any v1 entry may match, timestamp within 5 minutes."""
+    fields=[part.split('=',1) for part in header.split(',') if '=' in part]
+    stamps=[v for k,v in fields if k.strip()=='t'];given=[v for k,v in fields if k.strip()=='v1']
+    if not stamps or not given or not stamps[0].isdigit():return False
+    if abs((now or time.time())-int(stamps[0]))>tolerance:return False
+    expected=hmac.new(secret.encode(),stamps[0].encode()+b'.'+body,hashlib.sha256).hexdigest()
+    return any(hmac.compare_digest(expected,v) for v in given)
+
+def money(cents,currency):
+    amount=(cents or 0)/100
+    symbol={'usd':'$','gbp':'£','eur':'€'}.get((currency or '').lower())
+    text=(f'{amount:,.0f}' if amount==int(amount) else f'{amount:,.2f}')
+    return symbol+text if symbol else text+' '+(currency or '').upper()
+
+def stripe_message(event):
+    """(spoken line, ring?) for the Stripe events Zack cares about, else None."""
+    kind=event.get('type');item=(event.get('data') or {}).get('object') or {}
+    test='' if event.get('livemode',True) else 'Test mode: '
+    if kind=='checkout.session.completed' and item.get('payment_status') in {'paid','no_payment_required'}:
+        what='a new subscription' if item.get('mode')=='subscription' else 'a payment'
+        return test+f'Good news. {what[0].upper()+what[1:]} just came through on Parl.ai, {money(item.get("amount_total"),item.get("currency"))}.',True
+    if kind=='customer.subscription.deleted':
+        return test+'A Parl.ai subscription was just cancelled.',False
+    if kind=='invoice.payment_failed':
+        return test+f'A Parl.ai renewal payment of {money(item.get("amount_due"),item.get("currency"))} just failed.',False
+    return None
+
+def stripe_event(core,event):
+    import notify
+    with LOCK:
+        if event.get('id') in SEEN_EVENTS:return
+        SEEN_EVENTS.add(event.get('id'))
+    found=stripe_message(event)
+    if not found:return
+    text,ring=found
+    log('stripe event',event.get('type'))
+    if ring and ready(core.DATA) and awake_hours():
+        try:deliver(core,text);return
+        except Exception:log('stripe call failed\n'+traceback.format_exc())
+    try:notify.send(core,'Parl.ai · '+text)
+    except Exception:pass
+
 def start(core):
     if not ready(core.DATA):return None
     Bridge.core=core
     server=ThreadingHTTPServer(('127.0.0.1',PORT),Bridge)
-    threading.Thread(target=warm,args=(core,LINES),daemon=True).start()
+    threading.Thread(target=warm,args=(core,LINES+list(PROGRESS.values())),daemon=True).start()
     threading.Thread(target=server.serve_forever,daemon=True).start()
     return server

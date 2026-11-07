@@ -4,7 +4,8 @@ Twilio streams 8 kHz G.711 mu-law; Kyutai listens and Fish speaks at 24 kHz PCM1
 The companion venv has no numpy and Python 3.13+ removed audioop, so the codec,
 resamplers and the small server-side WebSocket (RFC 6455) live here.
 """
-import array, base64, hashlib, json, math, struct, threading
+import array, base64, hashlib, json, math, os, socket, ssl, struct, threading
+from urllib.parse import urlparse
 
 BIAS=0x84;CLIP=32635
 
@@ -72,27 +73,36 @@ def accept_key(key):
 class Closed(Exception):pass
 
 class Socket:
-    """Server side of an already-upgraded connection: masked frames in, unmasked frames out."""
-    def __init__(self,reader,writer):
-        self.reader=reader;self.writer=writer;self.lock=threading.Lock();self.closed=False
+    """An upgraded connection. Server side (default): masked frames in, unmasked out.
+    Client side (client=True, e.g. to Deepgram): every outgoing frame is masked, as RFC 6455 requires."""
+    def __init__(self,reader,writer,client=False,raw=None):
+        self.reader=reader;self.writer=writer;self.lock=threading.Lock();self.closed=False;self.client=client;self.raw=raw
     def _read(self,size):
         data=self.reader.read(size)
         if len(data)!=size:raise Closed()
         return data
     def _frame(self,opcode,payload):
-        size=len(payload)
-        if size<126:header=struct.pack('!BB',0x80|opcode,size)
-        elif size<65536:header=struct.pack('!BBH',0x80|opcode,126,size)
-        else:header=struct.pack('!BBQ',0x80|opcode,127,size)
+        size=len(payload);bit=0x80 if self.client else 0
+        if size<126:header=struct.pack('!BB',0x80|opcode,bit|size)
+        elif size<65536:header=struct.pack('!BBH',0x80|opcode,bit|126,size)
+        else:header=struct.pack('!BBQ',0x80|opcode,bit|127,size)
+        if self.client:
+            mask=os.urandom(4);header+=mask
+            payload=bytes(b^mask[i%4] for i,b in enumerate(payload))
         with self.lock:
             if self.closed:raise Closed()
             try:self.writer.write(header+payload);self.writer.flush()
             except OSError:self.closed=True;raise Closed() from None
     def send(self,value):self._frame(1,json.dumps(value,separators=(',',':')).encode())
+    def send_bytes(self,data):self._frame(2,data)
     def close(self):
         try:self._frame(8,struct.pack('!H',1000))
         except Closed:pass
         self.closed=True
+        if self.raw:
+            try:self.raw.shutdown(socket.SHUT_RDWR)
+            except OSError:pass
+            self.raw.close()
     def receive(self):
         """Next text message as a dict; answers pings; raises Closed at the end."""
         message=b''
@@ -111,3 +121,22 @@ class Socket:
             if first&0x80:
                 try:return json.loads(message)
                 except ValueError:message=b'';continue
+
+def connect(url,headers=None,timeout=10):
+    """Open a client WebSocket (wss:// or ws://) and return a client-mode Socket."""
+    parts=urlparse(url);secure=parts.scheme=='wss'
+    port=parts.port or (443 if secure else 80)
+    raw=socket.create_connection((parts.hostname,port),timeout=timeout)
+    if secure:raw=ssl.create_default_context().wrap_socket(raw,server_hostname=parts.hostname)
+    key=base64.b64encode(os.urandom(16)).decode()
+    path=(parts.path or '/')+('?'+parts.query if parts.query else '')
+    lines=[f'GET {path} HTTP/1.1',f'Host: {parts.netloc}','Upgrade: websocket','Connection: Upgrade',
+      f'Sec-WebSocket-Key: {key}','Sec-WebSocket-Version: 13',*[f'{k}: {v}' for k,v in (headers or {}).items()]]
+    raw.sendall(('\r\n'.join(lines)+'\r\n\r\n').encode())
+    reader=raw.makefile('rb');status=reader.readline()
+    response={}
+    while (line:=reader.readline()) not in (b'\r\n',b'\n',b''):
+        name,_,value=line.decode('latin-1').partition(':');response[name.strip().lower()]=value.strip()
+    if b' 101 ' not in status or response.get('sec-websocket-accept')!=accept_key(key):
+        raw.close();raise Closed('handshake refused: '+status.decode('latin-1').strip()[:80])
+    return Socket(reader,raw.makefile('wb'),client=True,raw=raw)

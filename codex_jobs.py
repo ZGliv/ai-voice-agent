@@ -5,6 +5,7 @@ from pathlib import Path
 LOCK=threading.RLock()
 PROCESSES={}
 ACTIVE_STATES={'running','preparing'}
+ASSISTANT_PARALLEL=3
 STANDALONE={'__new_site__','__research__','__assistant__'}
 LABELS={'__new_site__':'New website','__research__':'Research','__assistant__':'Assistant'}
 
@@ -153,10 +154,10 @@ def start_job(core,jid):
         job=get_job(core,jid)
         if job['status']!='draft':return job
         assistant=job['project_id']=='__assistant__'
-        # Assistant tasks and Codex work run in separate lanes: one of each at a time.
+        # Assistant lookups are independent read-only processes, so a few run side by side; Codex edits one at a time.
         lane="project_id='__assistant__'" if assistant else "project_id!='__assistant__'"
-        with core.connect() as db:active=db.execute(f"SELECT 1 FROM codex_jobs WHERE status IN ('running','preparing') AND {lane} LIMIT 1").fetchone()
-        if active:raise core.Problem('An assistant task is already running. Wait or cancel it first.' if assistant else 'A Codex job is already running. Wait or cancel it first.',409)
+        with core.connect() as db:active=db.execute(f"SELECT COUNT(*) FROM codex_jobs WHERE status IN ('running','preparing') AND {lane}").fetchone()[0]
+        if active>=(ASSISTANT_PARALLEL if assistant else 1):raise core.Problem(f'{ASSISTANT_PARALLEL} assistant tasks are already running. Wait for one to finish.' if assistant else 'A Codex job is already running. Wait or cancel it first.',409)
         if assistant:
             import assistant_jobs
             update(core,jid,status='preparing')
