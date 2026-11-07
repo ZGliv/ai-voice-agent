@@ -134,7 +134,25 @@ def call_test(_):
         detail=getattr(error,'read',lambda:b'')().decode(errors='replace')
         raise SystemExit(f'❌ Jarvis could not place the call: {error} {detail}'.strip())
 
-def restart(_):
+def busy():
+    # A restart kills live calls and running assistant tasks; never do that by accident.
+    reasons=[]
+    try:
+        port=os.environ.get('VOICE_PORT','4321')
+        with urlopen(Request(f'http://127.0.0.1:{port}/api/health',headers={'X-Voice-Client':'1'}),timeout=5) as response:health=json.load(response)
+        if health.get('calls'):reasons.append('a phone call is in progress')
+        if health.get('active'):reasons.append('Jarvis is answering')
+    except Exception:pass
+    import sqlite3
+    try:
+        with sqlite3.connect(DATA/'history.sqlite3') as db:
+            if db.execute("SELECT 1 FROM codex_jobs WHERE status IN ('running','preparing') LIMIT 1").fetchone():reasons.append('a background task is running')
+    except sqlite3.Error:pass
+    return reasons
+
+def restart(args):
+    reasons=busy()
+    if reasons and not args.force:raise SystemExit('Not restarting: '+', '.join(reasons)+'. Try again shortly, or add --force.')
     subprocess.run(['launchctl','kickstart','-k',f'gui/{os.getuid()}/{LABEL}'],check=True)
     print('Jarvis restarted.')
 
@@ -147,5 +165,5 @@ if __name__=='__main__':
     sub.add_parser('telegram-test').set_defaults(run=telegram_test)
     sub.add_parser('twilio').set_defaults(run=twilio)
     sub.add_parser('call-test').set_defaults(run=call_test)
-    sub.add_parser('restart').set_defaults(run=restart)
+    r=sub.add_parser('restart');r.add_argument('--force',action='store_true');r.set_defaults(run=restart)
     args=parser.parse_args();args.run(args)

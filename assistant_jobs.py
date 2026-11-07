@@ -183,9 +183,20 @@ def approve(core,jid):
     threading.Thread(target=run,args=(core,codex_jobs.get_job(core,jid),actions),daemon=True).start()
     return {'id':jid,'status':'preparing','approved':[a['action'] for a in actions]}
 
+def phone_origin(core,job):
+    # The conversation of a task Zack asked for on a phone call, so the answer goes back by phone.
+    import phone
+    with core.connect() as db:
+        row=db.execute('SELECT conversation_id FROM turns WHERE id=?',(job.get('source_turn_id') or '',)).fetchone()
+    return row[0] if row and phone.ready(core.DATA) and phone.is_phone_conversation(core,row[0]) else None
+
 def notify_done(core,job):
     try:
-        import notify, scheduler
+        import notify, scheduler, phone, job_announcements
+        origin=phone_origin(core,job)
+        if origin and job['status'] in {'completed','awaiting_approval','failed'}:
+            try:phone.deliver(core,job_announcements.message(job),origin)
+            except Exception:pass
         if job['status']=='awaiting_approval':
             actions=json.loads(job.get('approval') or '{}').get('actions') or []
             notify.send(core,'Approval needed: '+'; '.join(a['action'] for a in actions)+'\n\n'+job.get('result','')[:1500]+'\n\nOpen Jarvis and say "approve" to go ahead.')

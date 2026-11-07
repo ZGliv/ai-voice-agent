@@ -154,7 +154,7 @@ def update(turn_id, **values):
 def dependency_status():
     global HEALTH_CACHE
     if HEALTH_CACHE[1] and time.monotonic()-HEALTH_CACHE[0]<10:
-        return {**HEALTH_CACHE[1],'active':CURRENT}
+        return {**HEALTH_CACHE[1],'active':CURRENT,'calls':len(phone.LIVE)}
     checks = {
         'transcription': transcription_ready(),
         'audio': bool(shutil.which('ffmpeg') and shutil.which('ffprobe')),
@@ -172,7 +172,7 @@ def dependency_status():
             'reach': {'assistant': assistant_jobs.available(), 'telegram': notify.ready(DATA), 'phone': phone.ready(DATA)},
             'storage': 'This computer · SQLite and local audio files', 'max_seconds': 60}
     HEALTH_CACHE=(time.monotonic(),result)
-    return result
+    return {**result,'calls':len(phone.LIVE)}
 
 def run_process(args, timeout=180):
     global PROCESS
