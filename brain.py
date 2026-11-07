@@ -80,7 +80,8 @@ def request_body(cloud,payload):
     if 'api.openai.com' in cloud['base_url']:body['stream_options']={'include_usage':True}
     if payload.get('tools'):body['tools']=payload['tools']
     if 'num_predict' in options:body['max_completion_tokens' if 'api.openai.com' in cloud['base_url'] else 'max_tokens']=options['num_predict']
-    if 'temperature' in options and not cloud['model'].startswith(('gpt-5','o1','o3','o4')):body['temperature']=options['temperature']
+    # Reasoning-era models (GPT-5/o-series, current Claude) reject a custom temperature.
+    if 'temperature' in options and not cloud['model'].startswith(('gpt-5','o1','o3','o4','claude')):body['temperature']=options['temperature']
     body.update(cloud.get('body') or {})
     return body
 
@@ -165,7 +166,8 @@ def chat(data,payload,stop,on_text,meter=None):
             # Fall back only if nothing has been spoken yet; a half-streamed reply cannot be replaced silently.
             if streamed:raise RuntimeError('The cloud model stopped mid-reply.') from None
             if meter is not None:meter['fallback']=str(error)
-    local={**payload,'model':LOCAL_MODEL,'think':False,'keep_alive':-1}
+    # Pin the local model in memory only when it is the main brain; as a fallback it unloads after 5 idle minutes.
+    local={**payload,'model':LOCAL_MODEL,'think':False,'keep_alive':'5m' if cloud else -1}
     local['options']={'num_ctx':8192,**payload.get('options',{})}
     if meter is not None:meter.setdefault('model',LOCAL_MODEL);meter['local']=True
     started=time.monotonic()

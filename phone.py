@@ -170,7 +170,9 @@ class Bridge(BaseHTTPRequestHandler):
                 if item['status'] in {'failed','cancelled','interrupted','unheard'} or count>=WAIT_LIMIT:
                     message=item.get('output_text') or 'I could not finish that one, sir. Please try again.'
                     return self.reply(200,twiml(gather(base,say(message[:600]))))
-                return self.reply(200,twiml(f'<Pause length="1"/><Redirect method="POST">{base}/twilio/wait?turn={tid}&amp;n={count+1}</Redirect>'))
+                # A few seconds in, reassure the caller once instead of leaving dead air.
+                hold=play_or_say(core,base,'One moment, sir.') if count==3 else '<Pause length="1"/>'
+                return self.reply(200,twiml(f'{hold}<Redirect method="POST">{base}/twilio/wait?turn={tid}&amp;n={count+1}</Redirect>'))
         except Exception:
             return self.reply(200,twiml(say('Something went wrong on my end, sir.')+gather(base)))
         return self.reply(404,'Not found','text/plain')

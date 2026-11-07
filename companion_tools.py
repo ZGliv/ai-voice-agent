@@ -59,10 +59,12 @@ def pending(job):
     actions=json.loads(job.get('approval') or '{}').get('actions') or []
     return {'pending_actions':[{'action':a.get('action'),'details':a.get('input')} for a in actions],'assistant_summary':(job.get('result') or '')[:1200]}
 
+def clock():
+    return f'\nCurrent local time: {datetime.now().astimezone():%A %Y-%m-%d %H:%M %Z}.'
+
 def system_prompt(selected=None,reference=''):
     catalog=[{'id':p['id'],'name':p['name']} for p in project_memory.catalog()] if not selected else []
-    now=datetime.now().astimezone()
-    return PERSONALITY+f'\nCurrent local time: {now:%A %Y-%m-%d %H:%M %Z}.'+'\nSelected project: '+str(selected)+'\nProject IDs: '+json.dumps(catalog)+reference
+    return PERSONALITY+clock()+'\nSelected project: '+str(selected)+'\nProject IDs: '+json.dumps(catalog)+reference
 
 def verification_brief(raw):
     try:report=json.loads(raw or '{}') if isinstance(raw,str) else (raw or {})
