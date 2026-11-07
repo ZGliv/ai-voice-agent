@@ -1,5 +1,5 @@
 """Cached task-completion speech. Only assistant answers (meant for Zack) are read aloud; other worker output never is."""
-import hashlib, threading
+import hashlib, re, threading
 import fish_voice, speech_text
 LOCK=threading.Lock()
 TERMINAL={'completed','failed','interrupted','cancelled','awaiting_approval'}
@@ -7,7 +7,9 @@ TERMINAL={'completed','failed','interrupted','cancelled','awaiting_approval'}
 def spoken_answer(text):
     # The assistant puts a short spoken answer first; read only that paragraph, bounded.
     first=speech_text.for_speech(text.strip().split('\n\n')[0])
-    if len(first)>420:first=first[:420].rsplit('. ',1)[0]+'.'
+    # Two sentences at most: anything longer is a monologue on the phone.
+    first=' '.join(re.split(r'(?<=[.!?])\s+',first)[:2])
+    if len(first)>300:first=first[:300].rsplit(' ',1)[0]+'.'
     return first
 
 def message(job):

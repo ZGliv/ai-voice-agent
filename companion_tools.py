@@ -167,6 +167,10 @@ def execute(core,item,name,args):
             db.execute('INSERT OR REPLACE INTO voice_tool_results VALUES(?,?,?)',(item['id'],name,json.dumps(result)))
             return result
         if name=='delegate_task':
+            # "Sounds good" after asking for a lookup must not start the same search again.
+            running=db.execute("SELECT j.id,j.task FROM codex_jobs j JOIN turns t ON t.id=j.source_turn_id WHERE j.project_id='__assistant__' AND t.conversation_id=? AND j.status IN ('preparing','running') ORDER BY j.created DESC LIMIT 1",(item['conversation_id'],)).fetchone()
+            if running:
+                return {'id':running[0],'task':running[1],'status':'already_running','note':'This lookup is already running and its answer will be spoken when it finishes. Do not start another; say in a few words that it is still on it.'}
             result=assistant_jobs.delegate(core,args.get('task'),item['id'])
             db.execute('INSERT OR REPLACE INTO voice_tool_results VALUES(?,?,?)',(item['id'],name,json.dumps(result)))
             return {k:result.get(k) for k in ['id','task','status']}

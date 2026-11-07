@@ -1,5 +1,5 @@
 """Deepgram phone hearing, Stripe sale calls, progress lines, parallel lookups, the 30-minute watch."""
-import base64, hashlib, hmac, json, queue, socket, tempfile, threading, time, unittest
+import base64, hashlib, hmac, json, queue, socket, tempfile, threading, time, unittest, uuid
 from datetime import datetime
 from http.client import HTTPConnection
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -129,6 +129,31 @@ class ConversationTests(unittest.TestCase):
   self.assertIn('Travis',c.companion_tools.PHONE)
   source=Path(c.__file__).read_text()
   self.assertIn("messages.insert(1,{'role':'system','content':companion_tools.PHONE})",source)
+
+class LookupAnswerTests(unittest.TestCase):
+ def test_only_two_short_sentences_are_spoken(self):
+  import job_announcements
+  result='You applied to 25 jobs today. Veeva, BlueCat and Jamf were among them. I counted from midnight Eastern and left out three.\n\n- Source: Gmail'
+  self.assertEqual(job_announcements.spoken_answer(result),'You applied to 25 jobs today. Veeva, BlueCat and Jamf were among them.')
+ def test_a_second_ask_while_the_lookup_runs_does_not_start_another(self):
+  catalog=patch('project_memory.catalog',return_value=[]);catalog.start();self.addCleanup(catalog.stop)
+  with tempfile.TemporaryDirectory() as folder:
+   old=c.DATA;c.DATA=Path(folder)
+   try:
+    c.initialize()
+    cid=phone.new_conversation(c,'Phone call')
+    with patch.object(assistant_jobs,'run',lambda core,job,approved=None:None):
+     def turn(text):
+      tid=uuid.uuid4().hex
+      with c.connect() as db:db.execute("INSERT INTO turns(id,conversation_id,source,status,input_text,created,updated) VALUES(?,?,'text','thinking',?,?,?)",(tid,cid,text,time.time(),time.time()))
+      return {'id':tid,'conversation_id':cid,'input_text':text}
+     first=turn('how many jobs did I apply to today')
+     c.companion_tools.execute(c,first,'delegate_task',{'task':'Count job applications today'})
+     second=turn('sounds good')
+     again=c.companion_tools.execute(c,second,'delegate_task',{'task':'Count job applications today'})
+    self.assertEqual(again['status'],'already_running')
+    with c.connect() as db:self.assertEqual(db.execute("SELECT COUNT(*) FROM codex_jobs").fetchone()[0],1)
+   finally:c.DATA=old
 
 class StripeTests(unittest.TestCase):
  def setUp(self):
