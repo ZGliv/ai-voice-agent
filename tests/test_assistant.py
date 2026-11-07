@@ -50,7 +50,9 @@ class AssistantTests(unittest.TestCase):
   allowed=assistant_jobs.readonly(['WebSearch','Bash','Write','mcp__claude_ai_Gmail__search_threads','mcp__claude_ai_Gmail__send_message',
    'mcp__claude_ai_Gmail__get_thread','mcp__x__get_or_create_drive','mcp__computer-use__app_screenshot','mcp__claude-in-chrome__read_page',
    'mcp__claude_ai_Notion__notion-fetch','mcp__claude_ai_Gmail__trash_thread','mcp__claude_ai_Google_Calendar__list_events'])
-  self.assertEqual(set(allowed),{'WebSearch','mcp__claude_ai_Gmail__search_threads','mcp__claude_ai_Gmail__get_thread','mcp__claude_ai_Google_Calendar__list_events'})
+  self.assertEqual(set(allowed),{'WebSearch','mcp__claude_ai_Gmail__search_threads','mcp__claude_ai_Gmail__get_thread','mcp__claude_ai_Google_Calendar__list_events','mcp__claude_ai_Notion__notion-fetch'})
+  notion=assistant_jobs.readonly(['mcp__claude_ai_Notion__notion-calendar-list-events','mcp__claude_ai_Notion__notion-calendar-create-events','mcp__claude_ai_Notion__notion-update-page','mcp__claude_ai_Notion__notion-search'])
+  self.assertEqual(set(notion),{'mcp__claude_ai_Notion__notion-calendar-list-events','mcp__claude_ai_Notion__notion-search'})
 
  def test_humanize_tool_names(self):
   self.assertEqual(assistant_jobs.humanize('mcp__claude_ai_Gmail__send_message'),'Gmail: send message')

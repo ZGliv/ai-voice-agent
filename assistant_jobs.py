@@ -42,8 +42,16 @@ def readonly(tools):
         parts=name.split('__')
         if len(parts)<3 or EXCLUDED_SERVER.search(parts[1]):continue
         action=parts[-1].lower()
-        if READ_VERB.match(action) and not WRITE_WORD.search(action):allowed.append(name)
+        if READ_VERB.match(verb(action)) and not WRITE_WORD.search(action):allowed.append(name)
     return allowed
+
+def verb(action):
+    # Some servers prefix every action with their own name (notion-fetch, notion-calendar-list-events).
+    words=re.split(r'[-_]',action)
+    for index in range(len(words)):
+        rest='_'.join(words[index:])
+        if READ_VERB.match(rest) or WRITE_WORD.match(rest):return rest
+    return action
 
 def stale(core,tools):
     # A list cached while signed out has no account connectors; refresh it (and at least every 6 hours).
