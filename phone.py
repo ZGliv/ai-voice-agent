@@ -19,7 +19,7 @@ CALLS={}      # CallSid or outbound id -> {'conversation': id, 'empty': n, 'open
 AUDIO={}      # token -> (path, expires)
 LOCK=threading.Lock()
 WAIT_LIMIT=40 # 40 x ~1s polls before giving up on a reply
-GATHER='<Gather input="speech" action="{action}" method="POST" speechTimeout="auto" speechModel="phone_call" enhanced="true" language="en-GB" actionOnEmptyResult="true">{inner}</Gather>'
+GATHER='<Gather input="speech" action="{action}" method="POST" timeout="10" speechTimeout="auto" speechModel="phone_call" enhanced="true" language="en-US" actionOnEmptyResult="true">{inner}</Gather>'
 
 def config(data):
     try:value=json.loads((data/'twilio.json').read_text())
@@ -150,8 +150,8 @@ class Bridge(BaseHTTPRequestHandler):
                 text=params.get('SpeechResult','').strip()
                 if not text:
                     state['empty']+=1
-                    if state['empty']>=2:return self.reply(200,twiml(play_or_say(core,base,'I shall leave you to it, sir.')+'<Hangup/>'))
-                    return self.reply(200,twiml(gather(base)))
+                    if state['empty']>=3:return self.reply(200,twiml(play_or_say(core,base,'I shall leave you to it, sir.')+'<Hangup/>'))
+                    return self.reply(200,twiml(gather(base,play_or_say(core,base,'I didn\'t catch that, sir.'))))
                 state['empty']=0
                 if re.fullmatch(r'\W*(bye|goodbye|that\'?s all|hang up|thanks,? bye|thank you,? bye)\W*',text,re.I):
                     return self.reply(200,twiml(play_or_say(core,base,'Very good, sir.')+'<Hangup/>'))
