@@ -34,7 +34,8 @@ def available():
 def settings(core):
     try:saved=json.loads((core.DATA/'assistant.json').read_text())
     except (OSError,ValueError):saved={}
-    return {'model':saved.get('model','sonnet'),'max_turns':int(saved.get('max_turns',40)),'time_limit':int(saved.get('time_limit',900))}
+    # Low effort: lookups are a few tool calls; deeper hidden reasoning doubled the wait without better answers.
+    return {'model':saved.get('model','sonnet'),'effort':saved.get('effort','low'),'max_turns':int(saved.get('max_turns',40)),'time_limit':int(saved.get('time_limit',900))}
 
 def readonly(tools):
     allowed=[t for t in BUILTIN_READ if t in tools]
@@ -72,7 +73,7 @@ def command(core,allowed,resume=None):
     config=settings(core)
     now=datetime.now().astimezone()
     args=[claude(),'-p','--output-format','stream-json','--verbose','--permission-mode','dontAsk',
-      '--model',config['model'],'--max-turns',str(config['max_turns']),
+      '--model',config['model'],'--effort',config['effort'],'--max-turns',str(config['max_turns']),
       '--append-system-prompt',PROMPT+f' Current local time: {now:%A %d %B %Y, %H:%M %Z}.']
     if allowed:args+=['--allowedTools',','.join(allowed)]
     if resume:args+=['--resume',resume]
