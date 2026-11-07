@@ -66,6 +66,14 @@ def needs_tools(text):
 ACCOUNT_DATA=re.compile(r"\b(calendar|schedule|agenda|email|emails|e-mail|inbox|gmail|mail|unread|meeting|meetings|appointment|appointments|notion|google drive|my drive|my docs?|my documents)\b",re.I)
 # Tools that genuinely consult or act on Zack's accounts/schedules; any other answer about them is invented.
 # Said the instant a lookup is handed to the assistant; pre-rendered and rotated so it sounds natural.
+# Questions (never actions) about his own email, calendar, Notion or job applications.
+LOOKUP_TOPIC=re.compile(r"\b(?:emails?|e-mail|inbox|gmail|mail|unread|calendar|schedule|agenda|meetings?|appointments?|notion|appl(?:y|ied)|applications?|recruiters?|interviews?)\b",re.I)
+LOOKUP_ASK=re.compile(r"\b(?:how many|what(?:'s| is| are| did)?|when(?:'s| is)?|who|did (?:i|anyone|anybody)|do i have|have i|any(?:thing|one)? new|is there|are there|check|look (?:at|up|through)|tell me|find out|go through)\b",re.I)
+LOOKUP_ACTION=re.compile(r"\b(?:send|reply|respond|draft|write|book|delete|remove|cancel|schedule (?:a|an|the|it|me)|remind|create|add|move|reschedule|forward|archive|approve|go ahead|yes|yeah|do it)\b",re.I)
+
+def quick_lookup(text):
+    return bool(LOOKUP_TOPIC.search(text) and LOOKUP_ASK.search(text) and not LOOKUP_ACTION.search(text))
+
 HANDOFF_ACKS=['Let me have a look.','Checking now.','Give me a moment to pull that up.','On it. I’ll come back to you shortly.','Looking into it now.']
 HANDOFF_TOOLS={'delegate_task','schedule_task','list_schedules','change_schedule','job_status','read_job_result','approve_job','cancel_job','pause_listening'}
 
@@ -283,7 +291,10 @@ def work(turn_id):
                 # Survives the routing and speaking passes, which rebuild only the first system message.
                 messages.insert(1,{'role':'system','content':companion_tools.PHONE})
             conversational=False; text=''; routing_seconds=0
-            if incremental and (checkin or not needs_tools(item['input_text'])):
+            # An obvious question about his email, calendar or applications skips ~5 s of model routing.
+            fast=bool(incremental and not checkin and quick_lookup(item['input_text']))
+            if fast:timings['fast_lookup']=True
+            if incremental and not fast and (checkin or not needs_tools(item['input_text'])):
                 # Route and answer in ONE generation. Only the explicit SAY prefix
                 # is audible; action requests return TOOLS and enter the guarded loop.
                 def conversational_partial(partial):
@@ -318,7 +329,7 @@ def work(turn_id):
                     messages.append({'role':'system','content':route_rule})
             if incremental and not checkin and needs_tools(item['input_text']):messages.append({'role':'system','content':route_rule})
             ready_to_speak=False;used=set();delegated=False
-            for tool_round in range(0 if conversational else 4):
+            for tool_round in range(0 if conversational or fast else 4):
                 response=think({'model':LLM,'messages':messages,'think':False,
                     'tools':route_tools if incremental else companion_tools.TOOLS,'keep_alive':-1,
                     'options':{'num_predict':300,'num_ctx':LLM_CONTEXT,'temperature':.4}},
@@ -346,7 +357,7 @@ def work(turn_id):
                         'keep_alive':-1,'options':{'num_predict':300,'num_ctx':LLM_CONTEXT,'temperature':.4}},
                         lambda partial:update(turn_id,partial_text=partial))
                     if not response.get('tool_calls'):text=response.get('content','').strip()
-            if not conversational and ACCOUNT_DATA.search(item['input_text']) and not used&HANDOFF_TOOLS:
+            if not conversational and (fast or ACCOUNT_DATA.search(item['input_text'])) and not used&HANDOFF_TOOLS:
                 # The model tried to answer about Zack's accounts without looking. Never speak that; hand it off.
                 try:result=companion_tools.execute(sys.modules[__name__],item,'delegate_task',{'task':item['input_text']})
                 except Problem as error:result={'error':error.message}

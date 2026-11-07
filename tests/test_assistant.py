@@ -141,4 +141,24 @@ class HandoffGuardTests(unittest.TestCase):
   self.assertEqual(done['timings']['speech_detail']['mode'],'cached')
   self.assertTrue((c.DATA/'turns'/item['id']/'reply.wav').is_file())
 
+ def test_obvious_lookup_starts_without_waiting_on_the_model(self):
+  import wave
+  clip=c.DATA/'ack.wav'
+  with wave.open(str(clip),'wb') as w:w.setparams((1,2,24000,0,'NONE','not compressed'));w.writeframes(b'\x10\x10'*4800)
+  question='Um, you wanna tell me how many jobs I applied to today?'
+  with patch.object(c,'launch'):item=c.create_turn('a'*32,text=question)
+  with patch('fish_voice.key',return_value='k'),patch('fish_text_stream.available',return_value=True),\
+       patch('brain.chat',side_effect=AssertionError('the model should not be asked')),patch('phone.cached',return_value=clip),\
+       patch('assistant_jobs.delegate',return_value={'id':'j'*32,'task':'x','status':'preparing'}) as delegate:
+   c.CURRENT=item['id'];c.work(item['id'])
+  done=c.turn(item['id'])
+  delegate.assert_called_once();self.assertEqual(delegate.call_args[0][1],question)
+  self.assertIn(done['output_text'],c.HANDOFF_ACKS);self.assertTrue(done['timings']['fast_lookup'])
+
+ def test_actions_and_chat_never_take_the_lookup_shortcut(self):
+  for text in ['Reply to the Veeva email saying thanks','Yes, send it','How are you doing tonight?','Draft a reply to Veeva','Remind me to check my email at five']:
+   self.assertFalse(c.quick_lookup(text),text)
+  for text in ['Do I have any new emails?',"What's on my calendar tomorrow?",'How many jobs did I apply to today?']:
+   self.assertTrue(c.quick_lookup(text),text)
+
 if __name__=='__main__':unittest.main()
