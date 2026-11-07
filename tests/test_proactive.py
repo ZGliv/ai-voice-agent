@@ -15,10 +15,10 @@ def stripe_header(secret,body,stamp=None):
 class FakeDeepgram(BaseHTTPRequestHandler):
  """Accepts one stream, records audio frames, and ends a turn after enough audio."""
  protocol_version='HTTP/1.1'
- frames=[];auth=[]
+ frames=[];auth=[];paths=[]
  def log_message(self,*a):pass
  def do_GET(self):
-  FakeDeepgram.auth.append(self.headers.get('Authorization'))
+  FakeDeepgram.auth.append(self.headers.get('Authorization'));FakeDeepgram.paths.append(self.path)
   self.send_response(101);self.send_header('Upgrade','websocket');self.send_header('Connection','Upgrade')
   self.send_header('Sec-WebSocket-Accept',phone_media.accept_key(self.headers['Sec-WebSocket-Key']));self.end_headers()
   self.close_connection=True
@@ -47,7 +47,7 @@ class Core:
 
 class HearingTests(unittest.TestCase):
  def setUp(self):
-  FakeDeepgram.frames=[];FakeDeepgram.auth=[]
+  FakeDeepgram.frames=[];FakeDeepgram.auth=[];FakeDeepgram.paths=[]
   self.server=ThreadingHTTPServer(('127.0.0.1',0),FakeDeepgram)
   threading.Thread(target=self.server.serve_forever,daemon=True).start()
   self.addCleanup(self.server.server_close);self.addCleanup(self.server.shutdown)
@@ -64,6 +64,7 @@ class HearingTests(unittest.TestCase):
   self.assertEqual((kind,text),('answer','What is on my calendar?'))
   self.assertEqual(FakeDeepgram.auth,['Token dg-key'])
   self.assertTrue(all(len(f)==phone.FLUX_CHUNK for f in FakeDeepgram.frames[:4]))
+  self.assertIn('keyterm=Jarvis',FakeDeepgram.paths[0])   # so Jarvis is not heard as Travis
 
  def test_unreachable_deepgram_falls_back_to_local_recognition(self):
   (Core.DATA/'deepgram-api-key').write_text('dg-key')
@@ -93,6 +94,41 @@ class ProgressTests(unittest.TestCase):
   phone.progress(Core,'conv','TodoWrite')
   phone.progress(Core,'other','mcp__claude_ai_Gmail__search_threads')
   self.assertTrue(self.call.lines.empty())
+
+class ConversationTests(unittest.TestCase):
+ def setUp(self):
+  self.call=phone.Call(Core,FakeSocket(),'MZ1','conv')
+ def test_fragments_heard_while_busy_become_one_question(self):
+  heard=[]
+  self.call.answer=lambda text:(heard.append(text),self.call.done.set())
+  self.call.pending.put(('answer','What are'));self.call.pending.put(('answer','you doing right now?'))
+  self.call.worker()
+  self.assertEqual(heard,['What are you doing right now?'])
+ def test_a_quick_thanks_does_not_cut_jarvis_off_but_stop_does(self):
+  stopped=[]
+  self.call.speaking=lambda:True;self.call.interrupt=lambda:stopped.append(True)
+  self.call.heard_words('Thanks Jarvis','');self.assertEqual(stopped,[True])   # his name means he wants in
+  stopped.clear();self.call.heard_words('Okay thanks','');self.assertEqual(stopped,[])
+  self.call.heard_words('Wait','');self.assertEqual(stopped,[True])
+  stopped.clear();self.call.heard_words('actually make it Tuesday','');self.assertEqual(stopped,[True])
+ def test_jarvis_hangs_up_after_saying_goodbye(self):
+  class Turns:
+   CURRENT=None;STOP=threading.Event();DATA=None
+   reply=''
+   @classmethod
+   def create_turn(cls,conversation,text):return {'id':'t1'}
+   @classmethod
+   def turn(cls,tid):return {'status':'complete','output_text':cls.reply}
+  self.call.core=Turns;self.call.follow=lambda tid,generation:None
+  ended=[];self.call.hang_up=lambda after_playback=False:ended.append(after_playback)
+  Turns.reply='Shall I draft a reply to them, or is that goodbye for now?'
+  self.call.answer('is that all?');self.assertEqual(ended,[])   # "goodbye" mid-question is not a sign-off
+  Turns.reply='Very good, sir. Goodbye.'
+  self.call.answer("no, that's good");self.assertEqual(ended,[True])
+ def test_phone_turns_get_the_phone_rules(self):
+  self.assertIn('Travis',c.companion_tools.PHONE)
+  source=Path(c.__file__).read_text()
+  self.assertIn("messages.insert(1,{'role':'system','content':companion_tools.PHONE})",source)
 
 class StripeTests(unittest.TestCase):
  def setUp(self):

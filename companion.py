@@ -279,6 +279,9 @@ def work(turn_id):
             messages.append({'role':'user','content':item['input_text']})
             while sum(len(m['content']) for m in messages)>16000 and len(messages)>2:
                 del messages[1:3]
+            if phone.is_phone_conversation(sys.modules[__name__],item['conversation_id']):
+                # Survives the routing and speaking passes, which rebuild only the first system message.
+                messages.insert(1,{'role':'system','content':companion_tools.PHONE})
             conversational=False; text=''; routing_seconds=0
             if incremental and (checkin or not needs_tools(item['input_text'])):
                 # Route and answer in ONE generation. Only the explicit SAY prefix

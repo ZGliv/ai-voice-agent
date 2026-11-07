@@ -33,6 +33,10 @@ IDLE_LIMIT=60    # seconds of nobody talking before Jarvis hangs up
 CHUNK=3840       # 80 ms of 24 kHz PCM16 per recognition step (one Kyutai frame)
 FLUX='wss://api.deepgram.com/v2/listen'
 FLUX_CHUNK=640   # 80 ms of 8 kHz mu-law, Deepgram's recommended frame
+# Words Deepgram should expect; without them "Jarvis" comes out as Travis or Charter's.
+KEYTERMS=['Jarvis','Parl.ai','Notion','Gmail','Veeva','Supabase','Vercel','Telegram','Claude','Stripe']
+FAREWELL=re.compile(r'\bgoodbye\b[^a-z]*$',re.I)   # Jarvis ends the call by closing his reply with it
+STOP_WORDS=re.compile(r'\b(?:stop|wait|hold on|no|jarvis)\b',re.I)
 # Said on a live call while a lookup works, so a long search is never dead air.
 PROGRESS={'gmail':'Going through your inbox now.','notion':'Checking your Notion.','calendar':'Looking at your calendar.',
   'drive':'Searching your Drive.','supabase':'Checking the database.','vercel':'Checking Vercel.','web':'Having a look online.'}
@@ -242,6 +246,9 @@ class Call:
         finally:
             with self.lock:
                 if self.turn==item['id']:self.turn=None
+        # Jarvis decided the call is over (he closes with "Goodbye"): hang up instead of lingering.
+        if generation==self.generation and FAREWELL.search(core.turn(item['id']).get('output_text') or ''):
+            self.hang_up(after_playback=True)
 
     def announce(self,text):
         self.lines.put(text)
@@ -286,6 +293,10 @@ class Call:
                     except Exception:pass
                     finally:self.busy=False;self.heard=time.monotonic()
                 continue
+            # Several fragments heard while Jarvis was busy are one thought, not separate questions.
+            while True:
+                try:value+=' '+self.pending.get_nowait()[1]
+                except queue.Empty:break
             self.busy=True
             try:self.answer(value)
             except Closed:return
@@ -301,7 +312,8 @@ class Call:
         if text and text!=last:
             self.heard=time.monotonic()
             # Zack talking over Jarvis stops the reply, like a person would.
-            if self.speaking() and len(text.split())>=2:self.interrupt()
+            # "Thanks" or "okay" while he talks is acknowledgement, not an interruption.
+            if self.speaking() and (len(text.split())>=3 or STOP_WORDS.search(text)):self.interrupt()
         return text or last
 
     def listen(self):
@@ -314,7 +326,8 @@ class Call:
 
     def listen_flux(self,secret):
         """Deepgram Flux: phone-band audio in as-is, its own end-of-turn decision out. False = fall back."""
-        query=urlencode({'model':'flux-general-en','encoding':'mulaw','sample_rate':'8000','eot_threshold':'0.7','eot_timeout_ms':'4000'})
+        # 0.8 waits for a surer end of turn than 0.7, so one sentence with a pause is not split in two.
+        query=urlencode([('model','flux-general-en'),('encoding','mulaw'),('sample_rate','8000'),('eot_threshold','0.8'),('eot_timeout_ms','4000')]+[('keyterm',term) for term in KEYTERMS])
         ws=phone_media.connect(FLUX+'?'+query,{'Authorization':'Token '+secret})
         log('listening with deepgram')
         failed=threading.Event()
@@ -334,7 +347,8 @@ class Call:
                             self.pending.put(('answer',text))
                     else:last=self.heard_words(text,last)
             except Closed:pass
-            except Exception:log('deepgram reader failed\n'+traceback.format_exc())
+            except Exception:
+                if not self.done.is_set():log('deepgram reader failed\n'+traceback.format_exc())
             if not self.done.is_set():failed.set()
         reader=threading.Thread(target=read,daemon=True);reader.start()
         buffer=b''
