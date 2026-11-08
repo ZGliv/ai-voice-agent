@@ -43,6 +43,15 @@ PROGRESS={'gmail':'Going through your inbox now.','notion':'Checking your Notion
 PROGRESS_GAP=5.0 # seconds of Jarvis silence before a progress line is worth saying
 WAKING=(8,22)    # proactive calls only ring between these hours; otherwise Telegram
 SEEN_EVENTS=set()
+EAGER=0.5        # Deepgram's early "probably finished" signal; the reply starts then but plays only once he really has
+
+class Speculation:
+    """A reply started on an early end-of-turn guess: held silent until confirmed, dropped if he keeps talking."""
+    def __init__(self,text):
+        self.text=text;self.confirm=threading.Event();self.cancel=threading.Event();self.tid=None
+
+def same_words(a,b):
+    return re.sub(r'[^a-z0-9]+',' ',a.lower()).strip()==re.sub(r'[^a-z0-9]+',' ',b.lower()).strip()
 
 def log(*parts):
     # Goes to the service's error log; never includes audio, tokens or secrets.
@@ -177,7 +186,7 @@ class Call:
         self.audio=queue.Queue(maxsize=400);self.lines=queue.Queue();self.pending=queue.Queue()
         self.generation=0;self.marks=0;self.played=0;self.sending=False;self.turn=None;self.busy=False
         self.heard=time.monotonic();self.done=threading.Event();self.lock=threading.Lock()
-        self.last_spoke=time.monotonic();self.said=set()
+        self.last_spoke=time.monotonic();self.said=set();self.spec=None;self.turn_end=None
 
     # Outgoing audio
     def send_pcm(self,pcm,downsampler):
@@ -209,12 +218,17 @@ class Call:
         if turn and core.CURRENT==turn:core.STOP.set()
 
     # Answering
-    def follow(self,tid,generation):
+    def follow(self,tid,generation,spec=None):
         """Stream a companion turn's reply as it is synthesized (reply.pcm, then reply.wav)."""
         core=self.core;directory=core.DATA/'turns'/tid;offset=0;started=time.monotonic();held=False
         downsampler=Downsampler();deadline=started+120
         while time.monotonic()<deadline and generation==self.generation:
+            if spec and not spec.confirm.is_set():
+                # Started early: say nothing until he has really finished; drop it if he kept talking.
+                if spec.cancel.is_set():return
+                time.sleep(.01);started=time.monotonic();continue
             item=core.turn(tid)
+            if spec and spec.cancel.is_set():return
             if item['status'] in {'failed','cancelled','interrupted','unheard'}:
                 if generation==self.generation:self.say_line('I could not finish that one. Please try again.',generation)
                 return
@@ -227,6 +241,9 @@ class Call:
                     with path.open('rb') as audio:audio.seek(offset);chunk=audio.read(24000)
             except (FileNotFoundError,wave.Error,EOFError):pass
             if chunk:
+                if not offset and self.turn_end:
+                    log(f'reply audio {int((time.monotonic()-self.turn_end)*1000)} ms after he stopped talking'+(' (started early)' if spec else ''))
+                    self.turn_end=None
                 offset+=len(chunk);self.send_pcm(chunk,downsampler);continue
             if item['status']=='complete':break
             if not held and not offset and time.monotonic()-started>HOLD_AFTER:
@@ -234,23 +251,31 @@ class Call:
             time.sleep(.04)
         if generation==self.generation:self.mark()
 
-    def answer(self,text):
+    def answer(self,text,spec=None):
         core=self.core
-        if GOODBYE.fullmatch(text):
+        if GOODBYE.fullmatch(text) and not spec:
             self.say_line('Very good, sir.');self.hang_up(after_playback=True);return
         with self.lock:self.generation+=1;generation=self.generation;self.said.clear()
         # A barge-in may still be cancelling the previous reply.
         for _ in range(100):
             if not core.CURRENT:break
             time.sleep(.05)
+        if spec and spec.cancel.is_set():return
         try:item=core.create_turn(self.conversation,text=text[:4000])
         except core.Problem:
+            if spec:return
             self.say_line('I am still finishing something, sir. One moment.');return
+        if spec:
+            spec.tid=item['id'];core.SPECULATIVE[item['id']]=spec
+            if spec.cancel.is_set() and core.CURRENT==item['id']:core.STOP.set()
         with self.lock:self.turn=item['id']
-        try:self.follow(item['id'],generation)
+        try:self.follow(item['id'],generation,spec)
         finally:
+            core.SPECULATIVE.pop(item['id'],None)
             with self.lock:
                 if self.turn==item['id']:self.turn=None
+                if self.spec is spec:self.spec=None
+        if spec and spec.cancel.is_set():return
         # Jarvis decided the call is over (he closes with "Goodbye"): hang up instead of lingering.
         if generation==self.generation and FAREWELL.search(core.turn(item['id']).get('output_text') or ''):
             self.hang_up(after_playback=True)
@@ -298,10 +323,20 @@ class Call:
                     except Exception:pass
                     finally:self.busy=False;self.heard=time.monotonic()
                 continue
+            if kind=='eager':
+                if value.cancel.is_set():continue
+                self.busy=True
+                try:self.answer(value.text,value)
+                except Closed:return
+                except Exception:log('early answer failed\n'+traceback.format_exc())
+                finally:self.busy=False;self.heard=time.monotonic()
+                continue
             # Several fragments heard while Jarvis was busy are one thought, not separate questions.
             while True:
-                try:value+=' '+self.pending.get_nowait()[1]
+                try:more_kind,more=self.pending.get_nowait()
                 except queue.Empty:break
+                if more_kind=='answer':value+=' '+more
+                elif more_kind=='eager':more.cancel.set()
             self.busy=True
             try:self.answer(value)
             except Closed:return
@@ -310,6 +345,37 @@ class Call:
                 try:self.say_line('Something went wrong on my end, sir.')
                 except Exception:pass
             finally:self.busy=False;self.heard=time.monotonic()
+
+    def on_flux(self,message,last):
+        """One Deepgram Flux turn event; returns the latest partial transcript."""
+        event=message.get('event')
+        text=(message.get('transcript') or '').strip()
+        if event=='StartOfTurn':
+            # He started talking: stop at once, the way a person would.
+            self.heard=time.monotonic()
+            if self.speaking():self.interrupt()
+        elif event=='EagerEndOfTurn':
+            if text and self.spec is None and not self.busy and self.pending.empty():
+                self.spec=Speculation(text);self.pending.put(('eager',self.spec))
+        elif event=='TurnResumed':self.drop_spec()
+        elif event=='EndOfTurn':
+            self.turn_end=time.monotonic();spec=self.spec
+            if spec and not spec.cancel.is_set() and same_words(spec.text,text):
+                log('heard',len(text.split()),'words via deepgram (reply already started)')
+                spec.confirm.set();return ''
+            self.drop_spec()
+            if text:
+                log('heard',len(text.split()),'words via deepgram')
+                self.pending.put(('answer',text))
+            return ''
+        elif event:return self.heard_words(text,last)
+        return last
+
+    def drop_spec(self):
+        spec=self.spec;self.spec=None
+        if spec and not spec.confirm.is_set():
+            spec.cancel.set()
+            if spec.tid and self.core.CURRENT==spec.tid:self.core.STOP.set()
 
     # Listening
     def heard_words(self,text,last):
@@ -332,7 +398,7 @@ class Call:
     def listen_flux(self,secret):
         """Deepgram Flux: phone-band audio in as-is, its own end-of-turn decision out. False = fall back."""
         # 0.8 waits for a surer end of turn than 0.7, so one sentence with a pause is not split in two.
-        query=urlencode([('model','flux-general-en'),('encoding','mulaw'),('sample_rate','8000'),('eot_threshold','0.8'),('eot_timeout_ms','4000')]+[('keyterm',term) for term in KEYTERMS])
+        query=urlencode([('model','flux-general-en'),('encoding','mulaw'),('sample_rate','8000'),('eot_threshold','0.8'),('eager_eot_threshold',str(EAGER)),('eot_timeout_ms','4000')]+[('keyterm',term) for term in KEYTERMS])
         ws=phone_media.connect(FLUX+'?'+query,{'Authorization':'Token '+secret})
         log('listening with deepgram')
         failed=threading.Event()
@@ -342,15 +408,7 @@ class Call:
                 while not self.done.is_set():
                     message=ws.receive()
                     if message.get('type')=='Error':log('deepgram error:',str(message.get('description') or message)[:160]);break
-                    event=message.get('event')
-                    if not event:continue
-                    text=(message.get('transcript') or '').strip()
-                    if event=='EndOfTurn':
-                        last=''
-                        if text:
-                            log('heard',len(text.split()),'words via deepgram')
-                            self.pending.put(('answer',text))
-                    else:last=self.heard_words(text,last)
+                    last=self.on_flux(message,last)
             except Closed:pass
             except Exception:
                 if not self.done.is_set():log('deepgram reader failed\n'+traceback.format_exc())

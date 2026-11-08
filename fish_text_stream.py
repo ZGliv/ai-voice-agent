@@ -28,6 +28,11 @@ class TextSpeech:
         while self.buffer:
             match=re.search(r'[.!?](?:\s|$)',self.buffer)
             boundary=match.end() if match else (self.buffer.rfind(' ',0,160)+1 if len(self.buffer)>160 else 0)
+            if not boundary and self.first_text is None:
+                # The first words matter most: start the voice at the first natural pause instead of the full sentence.
+                pause=re.search(r'^(?:\S+\s+){2,}?\S+[,;:\u2014](?=\s)',self.buffer)
+                if pause:boundary=pause.end()
+                elif len(self.buffer.split())>10:boundary=self.buffer.rfind(' ')+1
             if not boundary:break
             self._text(self.buffer[:boundary]);self.buffer=self.buffer[boundary:]
     def _text(self,text):

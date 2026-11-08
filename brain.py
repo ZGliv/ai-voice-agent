@@ -82,46 +82,71 @@ def request_body(cloud,payload):
     if 'num_predict' in options:body['max_completion_tokens' if 'api.openai.com' in cloud['base_url'] else 'max_tokens']=options['num_predict']
     # Reasoning-era models (GPT-5/o-series, current Claude) reject a custom temperature.
     if 'temperature' in options and not cloud['model'].startswith(('gpt-5','o1','o3','o4','claude')):body['temperature']=options['temperature']
+    # Current Claude models think privately before answering unless told not to. For a spoken reply that
+    # hidden thinking was most of the wait (0.5-1.8 s to the first word) and sometimes used the whole budget.
+    if cloud['model'].startswith('claude'):body['thinking']={'type':'disabled'}
     body.update(cloud.get('body') or {})
     return body
 
+HEDGE_AFTER=0.6   # no first token by now: send an identical second request and keep whichever answers first
+HEDGES=2
+
 def cloud_chat(cloud,payload,stop,on_text,meter=None):
-    events=queue.Queue();abandoned=threading.Event();connection=[]
-    started=time.monotonic()
-    def read():
+    """Stream one reply. The same model sometimes takes 0.5 s and sometimes 1.8 s to start;
+    a hedged second request cuts that tail. Only one attempt's output is ever used."""
+    events=queue.Queue();abandoned=[];connections={};started=time.monotonic()
+    body=json.dumps(request_body(cloud,payload)).encode()
+    def read(attempt,stopped):
         try:
-            request=Request(cloud['base_url']+'/chat/completions',data=json.dumps(request_body(cloud,payload)).encode(),
+            request=Request(cloud['base_url']+'/chat/completions',data=body,
               headers={'Content-Type':'application/json','Authorization':'Bearer '+cloud['key']})
             with urlopen(request,timeout=20) as response:
-                connection.append(response)
+                connections.setdefault(attempt,[]).append(response)
                 for line in response:
-                    if abandoned.is_set():break
+                    if stopped.is_set():break
                     line=line.strip()
                     if not line.startswith(b'data:'):continue
                     line=line[5:].strip()
                     if line==b'[DONE]':break
-                    events.put(json.loads(line))
+                    events.put((attempt,json.loads(line)))
         except HTTPError as error:
             try:detail=json.loads(error.read()).get('error',{})
             except Exception:detail={}
             finally:error.close()
             message=detail.get('message','') if isinstance(detail,dict) else str(detail)
-            events.put(CloudError(f'{error.code} {message}'[:240]))
-        except Exception as error:events.put(CloudError(type(error).__name__+': '+str(error)[:200]))
-        finally:events.put(None)
-    threading.Thread(target=read,daemon=True).start()
+            events.put((attempt,CloudError(f'{error.code} {message}'[:240])))
+        except Exception as error:events.put((attempt,CloudError(type(error).__name__+': '+str(error)[:200])))
+        finally:events.put((attempt,None))
+    def launch():
+        stopped=threading.Event();abandoned.append(stopped)
+        threading.Thread(target=read,args=(len(abandoned)-1,stopped),daemon=True).start()
+    launch()
     content='';calls={};last=0;first=None;usage={};deadline=time.monotonic()+120
+    winner=None;finished=set();failure=None
     try:
         while True:
             if stop.is_set():raise InterruptedError()
             if time.monotonic()>deadline:raise CloudError('Cloud model timed out')
-            try:event=events.get(timeout=.05)
+            if winner is None and len(abandoned)<HEDGES and time.monotonic()-started>HEDGE_AFTER:
+                launch()
+                if meter is not None:meter['hedged']=meter.get('hedged',0)+1
+            try:attempt,event=events.get(timeout=.02)
             except queue.Empty:continue
-            if event is None:break
-            if isinstance(event,Exception):raise event
+            if winner is not None and attempt!=winner:continue
+            if event is None or isinstance(event,Exception):
+                if isinstance(event,Exception):failure=event
+                finished.add(attempt)
+                if winner is not None:break
+                if len(finished)>=len(abandoned) and (len(abandoned)>=HEDGES or failure):
+                    raise failure or CloudError('Empty model response')
+                continue
             if event.get('usage'):usage=event['usage']
             for choice in event.get('choices') or []:
                 delta=choice.get('delta') or {}
+                if (delta.get('content') or delta.get('tool_calls')) and winner is None:
+                    winner=attempt
+                    for index,other in enumerate(abandoned):
+                        if index!=attempt:other.set()
                 if delta.get('content'):
                     content+=delta['content']
                     if first is None:first=time.monotonic()-started
@@ -132,12 +157,13 @@ def cloud_chat(cloud,payload,stop,on_text,meter=None):
                     function=part.get('function') or {}
                     slot['name']+=function.get('name') or ''
                     slot['arguments']+=function.get('arguments') or ''
-            if content and not calls and time.monotonic()-last>.12:
+            # Pass text on quickly: the voice starts as soon as a speakable phrase exists.
+            if content and not calls and time.monotonic()-last>.03:
                 on_text(content);last=time.monotonic()
         if not content and not calls:raise CloudError('Empty model response')
         if meter is not None:
             meter.setdefault('calls',[]).append({'first_token':round(first or 0,3),'total':round(time.monotonic()-started,3),
-              'input_tokens':usage.get('prompt_tokens',0),'output_tokens':usage.get('completion_tokens',0)})
+              'input_tokens':usage.get('prompt_tokens',0),'output_tokens':usage.get('completion_tokens',0),**({'attempt':winner} if winner else {})})
         if not calls:return {'role':'assistant','content':content}
         parsed=[]
         for index in sorted(calls):
@@ -147,11 +173,12 @@ def cloud_chat(cloud,payload,stop,on_text,meter=None):
             parsed.append({'id':slot['id'] or 'call_'+uuid.uuid4().hex[:24],'function':{'name':slot['name'],'arguments':arguments if isinstance(arguments,dict) else {}}})
         return {'role':'assistant','content':content,'tool_calls':parsed}
     finally:
-        abandoned.set()
-        for response in connection:
-            try:response.fp.raw._sock.shutdown(socket.SHUT_RDWR)
-            except (AttributeError,OSError):pass
-            response.close()
+        for stopped in abandoned:stopped.set()
+        for responses in list(connections.values()):
+            for response in responses:
+                try:response.fp.raw._sock.shutdown(socket.SHUT_RDWR)
+                except (AttributeError,OSError):pass
+                response.close()
 
 def chat(data,payload,stop,on_text,meter=None):
     """Same contract as local_runtime.chat: returns an Ollama-style assistant message."""

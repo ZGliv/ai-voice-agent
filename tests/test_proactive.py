@@ -113,13 +113,13 @@ class ConversationTests(unittest.TestCase):
   stopped.clear();self.call.heard_words('actually make it Tuesday','');self.assertEqual(stopped,[True])
  def test_jarvis_hangs_up_after_saying_goodbye(self):
   class Turns:
-   CURRENT=None;STOP=threading.Event();DATA=None
+   CURRENT=None;STOP=threading.Event();DATA=None;SPECULATIVE={}
    reply=''
    @classmethod
    def create_turn(cls,conversation,text):return {'id':'t1'}
    @classmethod
    def turn(cls,tid):return {'status':'complete','output_text':cls.reply}
-  self.call.core=Turns;self.call.follow=lambda tid,generation:None
+  self.call.core=Turns;self.call.follow=lambda tid,generation,spec=None:None
   ended=[];self.call.hang_up=lambda after_playback=False:ended.append(after_playback)
   Turns.reply='Shall I draft a reply to them, or is that goodbye for now?'
   self.call.answer('is that all?');self.assertEqual(ended,[])   # "goodbye" mid-question is not a sign-off

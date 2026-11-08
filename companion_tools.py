@@ -43,7 +43,7 @@ PHONE=('This is a live phone call. His words reach you through speech recognitio
  'If you truly cannot tell, ask one short question about just the unclear part. '
  'Keep each reply to one sentence, two at most, and leave him room to talk; offer more instead of reciting it. '
  'When he is wrapping up ("that\'s all", "is that everything?", "I\'m good"), confirm briefly and, if you have not already, ask once whether he needs anything else. '
- 'When he says he is done, give a short warm sign-off whose last word is Goodbye, for example "Very good, sir. Goodbye." That ends the call, so only say Goodbye when he is finished.')
+ 'When he says he is done, give a short warm sign-off whose last word is Goodbye, for example "Very good, sir. Goodbye." That ends the call, so only say Goodbye when he is finished. A thank-you on its own is not a goodbye: acknowledge it in a few words and ask if there is anything else.')
 
 PERSONALITY=(CHARACTER+'Answer directly in one or two short sentences unless asked for detail. No Markdown or long preambles. '
  'When asked to read a job report, call read_job_result for that request even if you discussed it earlier. Give a short spoken summary, not a formatted report. Do not read source URLs aloud; they remain in the saved report. '
@@ -101,6 +101,13 @@ def initialize(db):
 
 def execute(core,item,name,args):
     if not isinstance(args,dict):raise core.Problem('Invalid tool arguments.')
+    spec=getattr(core,'SPECULATIVE',{}).get(item.get('id'))
+    if spec:
+        # A reply started before he had surely finished may think, but never act, until he has.
+        deadline=time.monotonic()+15
+        while not spec.confirm.is_set():
+            if spec.cancel.is_set() or time.monotonic()>deadline or core.STOP.is_set():raise core.Cancelled()
+            time.sleep(.02)
     allowed={t['function']['name'] for t in TOOLS}
     if name not in allowed:raise core.Problem('Unknown companion tool.')
     with core.GATE,core.connect() as db:

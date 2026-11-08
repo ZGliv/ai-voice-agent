@@ -36,6 +36,7 @@ MAX_BODY = 10 * 1024 * 1024
 ACTIVE = {'queued', 'transcribing', 'thinking', 'synthesizing'}
 GATE = threading.RLock()
 CURRENT = None
+SPECULATIVE = {}   # turn id -> phone.Speculation: started on an early end-of-turn guess, not yet confirmed
 STOP = threading.Event()
 PROCESS = None
 HEALTH_CACHE = (0, None)
@@ -57,11 +58,28 @@ def spoken_reply(text):
     # The model chooses when to say "sir"; nothing is prepended. Stays monotonic while streaming.
     return text.lstrip()
 
-def needs_tools(text):
+def route_speech(text,final=False):
+    """The spoken part of a routing reply, or None while it may still turn out to be TOOLS.
+    The model sometimes answers without the SAY marker; anything not marked TOOLS is speech."""
+    head=text.lstrip()
+    prefix=re.match(r'^SAY(?:[ \t]*\r?\n|[ \t:]+(?=\S))',head)
+    if prefix:return spoken_reply(head[prefix.end():])
+    if head.startswith('TOOLS'):return None
+    if not final and ('SAY\n'.startswith(head) or 'TOOLS'.startswith(head) or head.rstrip()=='SAY'):return None
+    return spoken_reply(head) if head.strip() else None
+
+def needs_tools(text,pending=False):
     # Keep explicit actions and personal/project facts out of the speech-only path.
     # This is a conservative guard, not an authorization mechanism; tools still
-    # enforce their own project scope and consent checks.
-    return bool(re.search(r"\b(save|remember|recall|forget|memory|decid(?:e|ed|ing)|decision|agree|agreed|project|parlay|parlai|codex|claude|job|task|status|build|implement|create|make|edit|fix|change|update|delete|remove|open|launch|start|run|stop|cancel|resume|deploy|publish|send|search|research|look up|look at|check|latest|rundown|overnight|catch me up|what happened|spin up|get started|kick off|current|today|weather|news|calendar|email|emails|inbox|meeting|meetings|schedule|remind|reminder|notion|drive|doc|docs|text me|call me|message|tomorrow|tonight|yes|yeah|approve|go ahead|do it|send it|book it|decline|don't|my|our)\b|\b(?:we|I) (?:did|said|left|agreed|chose)\b|^(?:please )?pause\b|\bpause (?:listening|the conversation)\b",text,re.I))
+    # enforce their own project scope and consent checks. Everyday words ("tonight", "my", "yes")
+    # only force the slower tool route while an action is actually waiting for his yes; otherwise
+    # the one-pass route decides, and still answers TOOLS whenever it needs them.
+    if pending and re.search(r"\b(?:yes|yeah|yep|sure|approve|go ahead|do it|send it|book it|decline|don't|no)\b",text,re.I):return True
+    return bool(re.search(r"\b(next steps?|to-?do|working on|left off|where (?:are|were) we|save|remember|recall|forget|memory|decid(?:e|ed|ing)|decision|agree|agreed|project|parlay|parlai|codex|claude|job|task|status|build|implement|create|make|edit|fix|change|update|delete|remove|open|launch|start|run|stop|cancel|resume|deploy|publish|send|search|research|look up|look at|check|latest|rundown|overnight|catch me up|what happened|spin up|get started|kick off|current|weather|news|calendar|email|emails|inbox|meeting|meetings|schedule|remind|reminder|notion|drive|doc|docs|text me|call me|message)\b|\b(?:we|I) (?:did|said|left|agreed|chose)\b|^(?:please )?pause\b|\bpause (?:listening|the conversation)\b",text,re.I))
+
+def approval_waiting(conversation):
+    with connect() as db:
+        return bool(db.execute("SELECT 1 FROM codex_jobs j JOIN turns t ON t.id=j.source_turn_id WHERE t.conversation_id=? AND j.status='awaiting_approval' LIMIT 1",(conversation,)).fetchone())
 
 ACCOUNT_DATA=re.compile(r"\b(calendar|schedule|agenda|email|emails|e-mail|inbox|gmail|mail|unread|meeting|meetings|appointment|appointments|notion|google drive|my drive|my docs?|my documents)\b",re.I)
 # Tools that genuinely consult or act on Zack's accounts/schedules; any other answer about them is invented.
@@ -300,14 +318,13 @@ def work(turn_id):
             fast=bool(incremental and not checkin and quick_lookup(item['input_text']))
             if fast:timings['fast_lookup']=True
             # With a fresh briefing, one quick model pass answers from it; only a miss becomes a lookup.
-            if incremental and (checkin or (fast and known) or (not fast and not needs_tools(item['input_text']))):
+            if incremental and (checkin or (fast and known) or (not fast and not needs_tools(item['input_text'],approval_waiting(item['conversation_id'])))):
                 # Route and answer in ONE generation. Only the explicit SAY prefix
                 # is audible; action requests return TOOLS and enter the guarded loop.
                 def conversational_partial(partial):
                     nonlocal text_stream,routing_seconds
-                    prefix=re.match(r'^SAY[ \t]*\r?\n',partial)
-                    if not prefix:return
-                    spoken=spoken_reply(partial[prefix.end():])
+                    spoken=route_speech(partial)
+                    if spoken is None:return
                     if not spoken:return
                     if text_stream is None:
                         routing_seconds=time.monotonic()-start
@@ -321,8 +338,7 @@ def work(turn_id):
                     'options':{'num_predict':300,'num_ctx':LLM_CONTEXT,'temperature':.2}},conversational_partial)
                 raw=route.get('content','')
                 if route.get('tool_calls'):raise Problem('Unexpected action in conversation routing. No action was run.',503)
-                prefix=re.match(r'^SAY[ \t]*\r?\n',raw)
-                spoken=spoken_reply(raw[prefix.end():]) if prefix else ''
+                spoken=route_speech(raw,final=True) or ''
                 conversational=bool(spoken.strip())
                 if conversational:
                     conversational_partial(raw);text=spoken.strip()
@@ -333,7 +349,7 @@ def work(turn_id):
                     if text_stream:raise Problem('The streamed reply changed unexpectedly.',503)
                     if checkin:raise Problem('The project reply was not in the expected format. Please try again.',503)
                     messages.append({'role':'system','content':route_rule})
-            if incremental and not checkin and needs_tools(item['input_text']):messages.append({'role':'system','content':route_rule})
+            if incremental and not checkin and needs_tools(item['input_text'],approval_waiting(item['conversation_id'])):messages.append({'role':'system','content':route_rule})
             ready_to_speak=False;used=set();delegated=False
             for tool_round in range(0 if conversational or fast else 4):
                 response=think({'model':LLM,'messages':messages,'think':False,
