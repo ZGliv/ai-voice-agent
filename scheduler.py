@@ -31,7 +31,8 @@ def initialize(db):
       enabled INTEGER DEFAULT 1,next_run REAL,last_run REAL DEFAULT 0,created REAL)''')
     for item in DEFAULTS:
         row=db.execute('SELECT task FROM schedules WHERE id=?',(item['id'],)).fetchone()
-        if row and row[0] in RETIRED.get(item['id'],[]):
+        # Older built-in wording (any text carrying the BRIEFING line is Jarvis's own) is upgraded in place.
+        if row and row[0]!=item['task'] and (row[0] in RETIRED.get(item['id'],[]) or 'BRIEFING:' in row[0]):
             db.execute('UPDATE schedules SET task=?,repeat=?,window=?,next_run=? WHERE id=?',(item['task'],item['repeat'],item['window'],next_run(item,time.time()),item['id']))
         if not row:
             db.execute('INSERT INTO schedules(id,kind,label,task,repeat,at,window,deliver,quiet,enabled,next_run,created) VALUES(:id,:kind,:label,:task,:repeat,:at,:window,:deliver,:quiet,1,:next_run,:created)',
