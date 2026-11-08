@@ -242,6 +242,8 @@ class LaneTests(unittest.TestCase):
  def test_email_drafts_run_without_approval_but_sending_does_not(self):
   allowed=assistant_jobs.readonly(['mcp__claude_ai_Gmail__create_draft','mcp__claude_ai_Gmail__update_draft','mcp__claude_ai_Gmail__send_message','mcp__claude_ai_Gmail__delete_draft'])
   self.assertEqual(allowed,['mcp__claude_ai_Gmail__create_draft','mcp__claude_ai_Gmail__update_draft'])
+  reads=assistant_jobs.readonly(['mcp__claude_ai_Vercel__list_deployments','mcp__claude_ai_Vercel__get_deployment','mcp__claude_ai_Vercel__create_deployment'])
+  self.assertEqual(reads,['mcp__claude_ai_Vercel__list_deployments','mcp__claude_ai_Vercel__get_deployment'])
 
 class WatchTests(unittest.TestCase):
  def test_half_hourly_watch_stays_inside_its_window(self):

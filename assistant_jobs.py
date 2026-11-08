@@ -11,7 +11,7 @@ import codex_jobs
 
 LANE='__assistant__'
 READ_VERB=re.compile(r'^(get|list|search|read|fetch|query|view|find|lookup|count|aggregate|whoami|download|describe|retrieve|preview|display|open_nodes|filter|explain)')
-WRITE_WORD=re.compile(r'create|update|delete|send|post|write|move|trash|label|mark|share|cancel|add_|remove|set_|edit|apply|deploy|purchase|buy|pay|transfer|invite|reply|forward|upload|merge|pause|restore|rename|assign|approve|issue|revoke|kill|stop|run|execute|submit|publish|reset|rebase|complete|activate|authorize|accept|resolve|react|duplicate|copy|convert|import|record|invalidate|replace|stage|start|extend|patch|spawn|link|verify|connect|enable|disable|unlabel|untrash|spam')
+WRITE_WORD=re.compile(r'create|update|delete|send|post|write|move|trash|label|mark|share|cancel|add_|remove|set_|edit|apply|deploy(?!ment)|purchase|buy|pay|transfer|invite|reply|forward|upload|merge|pause|restore|rename|assign|approve|issue|revoke|kill|stop|run|execute|submit|publish|reset|rebase|complete|activate|authorize|accept|resolve|react|duplicate|copy|convert|import|record|invalidate|replace|stage|start|extend|patch|spawn|link|verify|connect|enable|disable|unlabel|untrash|spam')
 # Servers that drive this Mac or its apps are never auto-approved, even for "read" verbs.
 EXCLUDED_SERVER=re.compile(r'computer.use|claude.in.chrome|control_chrome|terminal|ccd_|scheduled.tasks|filesystem|browser',re.I)
 BUILTIN_READ=['WebSearch','WebFetch','ToolSearch','TodoWrite']
@@ -197,6 +197,9 @@ def run(core,job,approved=None):
             denials=[{'tool':d.get('tool_name',''),'action':humanize(d.get('tool_name','')),'input':d.get('tool_input',{})}
               for d in result.get('permission_denials') or [] if d.get('tool_name')]
             cost=result.get('total_cost_usd')
+            if denials and (job.get('source_turn_id') or '').startswith('schedule:'):
+                # A background watch never waits on approval; it reports what it could read.
+                denials=[]
             if denials:
                 codex_jobs.update(core,job['id'],status='awaiting_approval',result=text,approval=json.dumps({'actions':denials[:5],'requested':time.time()}))
                 codex_jobs.progress(core,job['id'],'Waiting for your approval: '+'; '.join(d['action'] for d in denials[:5]))
