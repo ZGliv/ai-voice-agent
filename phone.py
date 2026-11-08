@@ -18,7 +18,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlencode, urlparse
 from urllib.request import Request, urlopen
 from xml.sax.saxutils import escape, quoteattr
-import fish_voice
+import briefing, fish_voice
 import phone_media
 from phone_media import Closed, Downsampler, Socket, Upsampler, accept_key
 
@@ -159,6 +159,11 @@ def progress(core,conversation,tool):
     name=tool.lower()
     line=next((text for key,text in PROGRESS.items() if key in name),None)
     if live and line:live.update(line)
+
+def greeting(core):
+    """Fresh news to open an incoming call with, once per briefing and only when its audio is ready; else None."""
+    news=briefing.peek_opener(core.DATA)
+    return briefing.take_opener(core.DATA) if news and cached(core,news) else None
 
 def is_phone_conversation(core,conversation):
     with core.connect() as db:
@@ -421,6 +426,9 @@ class Call:
                 if LIVE.get(self.conversation) is self:LIVE.pop(self.conversation,None)
             turn=self.turn
             if turn and self.core.CURRENT==turn:self.core.STOP.set()
+            # Keep anything lasting from this call (people, preferences, what he is waiting on) for next time.
+            import personal_memory
+            threading.Thread(target=personal_memory.review_call,args=(self.core,self.conversation),daemon=True).start()
 
 class Bridge(BaseHTTPRequestHandler):
     core=None
@@ -470,7 +478,9 @@ class Bridge(BaseHTTPRequestHandler):
             return self.reply(403,'Forbidden','text/plain')
         if urlparse(self.path).path!='/twilio/voice':return self.reply(404,'Not found','text/plain')
         if digits(params.get('From',''))!=digits(settings['my_number']):return self.reply(200,twiml('<Reject reason="rejected"/>'))
-        try:return self.reply(200,stream_twiml(core,settings,new_conversation(core,'Phone call'),'Yes, sir?'))
+        try:
+            news=greeting(core)
+            return self.reply(200,stream_twiml(core,settings,new_conversation(core,'Phone call',news),news or 'Yes, sir?'))
         except Exception:return self.reply(200,twiml(say('Something went wrong on my end, sir.')))
 
     def stripe(self):

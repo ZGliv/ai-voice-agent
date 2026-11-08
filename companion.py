@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Loopback-only companion. Explicit Fish speech and Codex handoffs; no dummy output."""
-import project_memory, companion_tools, codex_jobs, local_runtime, fish_voice, native_transcriber, brain, scheduler, notify, phone, assistant_jobs
+import project_memory, personal_memory, briefing, companion_tools, codex_jobs, local_runtime, fish_voice, native_transcriber, brain, scheduler, notify, phone, assistant_jobs
 import sys, hashlib, speech_text, base64, fish_text_stream
 from live_drafts import DRAFTS
 from streaming_recognition import StreamingRecognition
@@ -125,6 +125,7 @@ def initialize():
             created REAL,updated REAL,timings TEXT DEFAULT '{}');
           CREATE TABLE IF NOT EXISTS turn_requests(request_id TEXT PRIMARY KEY,turn_id TEXT REFERENCES turns(id) ON DELETE CASCADE,fingerprint TEXT NOT NULL);''')
         project_memory.initialize(db)
+        personal_memory.initialize(db)
         companion_tools.initialize(db)
         codex_jobs.initialize(db)
         scheduler.initialize(db)
@@ -287,14 +288,19 @@ def work(turn_id):
             messages.append({'role':'user','content':item['input_text']})
             while sum(len(m['content']) for m in messages)>16000 and len(messages)>2:
                 del messages[1:3]
+            # Extra system messages at index 1 survive the routing and speaking passes, which rebuild only the first.
+            remembered=personal_memory.context(sys.modules[__name__])
+            if remembered:messages.insert(1,{'role':'system','content':remembered})
+            known=briefing.context(DATA)
+            if known:messages.insert(1,{'role':'system','content':known})
             if phone.is_phone_conversation(sys.modules[__name__],item['conversation_id']):
-                # Survives the routing and speaking passes, which rebuild only the first system message.
                 messages.insert(1,{'role':'system','content':companion_tools.PHONE})
             conversational=False; text=''; routing_seconds=0
             # An obvious question about his email, calendar or applications skips ~5 s of model routing.
             fast=bool(incremental and not checkin and quick_lookup(item['input_text']))
             if fast:timings['fast_lookup']=True
-            if incremental and not fast and (checkin or not needs_tools(item['input_text'])):
+            # With a fresh briefing, one quick model pass answers from it; only a miss becomes a lookup.
+            if incremental and (checkin or (fast and known) or (not fast and not needs_tools(item['input_text']))):
                 # Route and answer in ONE generation. Only the explicit SAY prefix
                 # is audible; action requests return TOOLS and enter the guarded loop.
                 def conversational_partial(partial):

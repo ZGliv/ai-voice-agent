@@ -5,9 +5,11 @@ answer (watch tasks stay silent when nothing needs attention). Delivery is Teleg
 a phone call when the schedule asks for one or the answer is marked URGENT.
 """
 import json, re, threading, time, uuid
+import briefing
 from datetime import datetime, timedelta
 
 POLL=20
+PREVIOUS_WATCH='Check Zack\'s email and calendar for anything new since {since} that genuinely needs his attention: a reply from a real person, a deadline, a meeting change, a payment or security alert. Ignore newsletters, promotions, job-board alerts and automatic application confirmations. If nothing qualifies, reply with exactly NOTHING. Phone him (begin your answer with URGENT:) when it is worth interrupting him: a recruiter or employer replying about an interview, an offer or next steps; anything that needs action within two hours; a calendar event starting in the next 45 minutes that changed or that he may not know about; a security or payment alert. After URGENT:, write exactly what JARVIS should say when Zack picks up: one or two short spoken sentences with the news (who and what, no email addresses or links), then one concrete offer of the next step you could take, such as "Shall I draft a reply suggesting Tuesday at ten?". Draft nothing and send nothing now; he answers on the call. For everything else that qualifies, write a short Telegram summary instead.'
 STOP=threading.Event()
 DEFAULTS=[
  {'id':'morning-briefing','kind':'task','label':'Morning briefing','repeat':'daily','at':'07:30','window':'','deliver':'telegram','quiet':0,
@@ -17,10 +19,11 @@ DEFAULTS=[
    'If nothing qualifies, reply with exactly NOTHING. '
    'Phone him (begin your answer with URGENT:) when it is worth interrupting him: a recruiter or employer replying about an interview, an offer or next steps; anything that needs action within two hours; a calendar event starting in the next 45 minutes that changed or that he may not know about; a security or payment alert. '
    'After URGENT:, write exactly what JARVIS should say when Zack picks up: one or two short spoken sentences with the news (who and what, no email addresses or links), then one concrete offer of the next step you could take, such as "Shall I draft a reply suggesting Tuesday at ten?". '
-   'Draft nothing and send nothing now; he answers on the call. For everything else that qualifies, write a short Telegram summary instead.'},
+   'When a real person (a recruiter, an employer, a client) wrote and clearly expects a reply, save a short draft reply in Gmail now (saving a draft is allowed; never send) and make the offer "I\'ve drafted a reply saying ... Shall I send it?". Draft nothing else and send nothing. '
+   'For everything else that qualifies, write a short Telegram summary instead. '+briefing.TASK},
 ]
 # Earlier built-in wording, upgraded in place so an untouched default picks up improvements.
-RETIRED={'inbox-watch':['Check Zack\'s email and calendar for anything new since {since} that genuinely needs his attention: a reply from a real person, a deadline, a meeting change, a payment or security alert. Ignore newsletters, promotions and routine notifications. If nothing qualifies, reply with exactly NOTHING. If something needs action within two hours, begin your answer with URGENT:']}
+RETIRED={'inbox-watch':[PREVIOUS_WATCH,'Check Zack\'s email and calendar for anything new since {since} that genuinely needs his attention: a reply from a real person, a deadline, a meeting change, a payment or security alert. Ignore newsletters, promotions and routine notifications. If nothing qualifies, reply with exactly NOTHING. If something needs action within two hours, begin your answer with URGENT:']}
 
 def initialize(db):
     db.execute('''CREATE TABLE IF NOT EXISTS schedules(id TEXT PRIMARY KEY,kind TEXT NOT NULL,label TEXT NOT NULL,task TEXT NOT NULL,
@@ -114,7 +117,12 @@ def job_done(core,job):
     sid=job.get('source_turn_id','').split(':')[1]
     with core.connect() as db:row=db.execute('SELECT * FROM schedules WHERE id=?',(sid,)).fetchone()
     if not row:return
-    text=(job.get('result') or '').strip()
+    text,known=briefing.split((job.get('result') or '').strip())
+    if known is not None and job['status']=='completed':
+        briefing.save(core.DATA,known)
+        import phone
+        # Render the call opener now so it plays the instant he next calls.
+        if known.get('opener') and phone.ready(core.DATA):threading.Thread(target=phone.warm,args=(core,[str(known['opener'])]),daemon=True).start()
     if job['status']!='completed' or not text:return
     if row['quiet'] and re.match(r'^\W*NOTHING\b',text,re.I):return
     urgent=bool(re.match(r'^\W*URGENT\s*:',text,re.I))

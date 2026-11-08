@@ -27,6 +27,7 @@ TOOLS=[
  schema('schedule_task','Create a reminder or recurring task when Zack asks to be reminded, called, texted or briefed at a time. kind reminder delivers the text itself; kind task runs the background assistant then delivers its answer. at is local ISO date-time YYYY-MM-DDTHH:MM for once, or HH:MM for daily. deliver is telegram (text) or call (phone call).',{'kind':{'type':'string','enum':['reminder','task']},'label':STRING,'task':STRING,'repeat':{'type':'string','enum':['once','daily']},'at':STRING,'deliver':{'type':'string','enum':['telegram','call']}},['kind','label','task','repeat','at','deliver']),
  schema('list_schedules','List reminders and recurring tasks (morning briefing, inbox watch) with their IDs, times, delivery and whether they are on.',{},[]),
  schema('change_schedule','Turn a schedule on or off, delete it, or change its delivery or time, ONLY when Zack asks. First call list_schedules in this turn for the exact ID.',{'schedule_id':STRING,'action':{'type':'string','enum':['enable','disable','delete','update']},'deliver':{'type':'string','enum':['telegram','call']},'at':STRING},['schedule_id','action']),
+ schema('remember','Remember a lasting fact about Zack for future conversations: a person and their role, a preference, a commitment, or something he is waiting on. Use when he asks you to remember something personal, or states a lasting preference ("I prefer morning interviews"). Not for project decisions (use save_memory) or anything trivial. One short sentence about Zack.',{'fact':STRING},['fact']),
  schema('job_status','Read real job status. Without query returns five newest jobs. Use query with a few distinctive words from a task or project to search ALL saved history, including older builds. Every word must match; use fewer words if no results.',{'query':STRING},[])]
 
 CHARACTER=('You are J.A.R.V.I.S., Zack\'s AI, in the spirit of Tony Stark\'s assistant from the Iron Man and Avengers films. '
@@ -107,6 +108,9 @@ def execute(core,item,name,args):
             result=json.loads(prior[0])
             return codex_jobs.get_job(core,result['id']) if name in {'start_codex_job','build_website','research_task','continue_job','delegate_task'} else result
         pid=project_memory.project_id(db,item['conversation_id'])
+        if name=='remember':
+            import personal_memory
+            return personal_memory.store(core,db,args.get('fact'))
         if name=='pause_listening':
             db.execute("UPDATE turns SET client_action='pause_listening' WHERE id=?",(item['id'],))
             result={'pause_after_reply':True,'background_jobs_unchanged':True,'resume':'Tap the orb to resume listening. Speech cannot resume a paused microphone.'}
