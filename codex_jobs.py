@@ -192,13 +192,14 @@ def consume_event(core,jid,event):
     elif kind=='file_change' and event_type=='item.completed':progress(core,jid,'Updated files: '+', '.join(c.get('path','') for c in item.get('changes',[])))
     elif event_type=='turn.failed':progress(core,jid,'Codex reported a failure. '+str(event.get('error',{}).get('message','')))
 
-def execute_worker(core,job,command,prompt,directory,prefix='',limit=1800,cwd=None,env=None,parse=None):
-    """One bounded worker process; cancellation uses the same job process registry."""
+def execute_worker(core,job,command,prompt,directory,prefix='',limit=1800,cwd=None,env=None,parse=None,ready=None):
+    """One bounded worker process; cancellation uses the same job process registry.
+    `ready` is an already-booted process for `command` (see assistant_jobs.keep_warm)."""
     parse=parse or (lambda event:consume_event(core,job['id'],event))
     with (directory/(prefix+'events.jsonl')).open('w') as out,(directory/(prefix+'stderr.log')).open('w') as err:
         with LOCK:
             if get_job(core,job['id'])['status']!='running':return
-            process=subprocess.Popen(command,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=err,text=True,start_new_session=True,bufsize=1,cwd=cwd,env=env)
+            process=ready or subprocess.Popen(command,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=err,text=True,start_new_session=True,bufsize=1,cwd=cwd,env=env)
             PROCESSES[job['id']]=process
             process.stdin.write(prompt);process.stdin.close()
         def timeout():

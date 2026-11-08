@@ -4,7 +4,7 @@ Read-only tools run freely. Every other tool is denied by --permission-mode dont
 the denied calls (exact tool + input) are saved and the job waits for spoken approval.
 Approval resumes the same Claude session with only those tool names added.
 """
-import json, os, re, shutil, threading, time
+import json, os, re, shutil, subprocess, threading, time
 from datetime import datetime
 from pathlib import Path
 import codex_jobs
@@ -74,14 +74,59 @@ def clean_env():
     return {k:v for k,v in os.environ.items() if not k.startswith(('ANTHROPIC_','CLAUDE_CODE_','CLAUDECODE','CLAUDE_AGENT_SDK'))}
 
 def command(core,allowed,resume=None):
+    # The prompt arrives as one stream-json message, so a process can boot before the question exists.
     config=settings(core)
-    now=datetime.now().astimezone()
-    args=[claude(),'-p','--output-format','stream-json','--verbose','--permission-mode','dontAsk',
+    args=[claude(),'-p','--input-format','stream-json','--output-format','stream-json','--verbose','--permission-mode','dontAsk',
       '--model',config['model'],'--effort',config['effort'],'--max-turns',str(config['max_turns']),
-      '--append-system-prompt',PROMPT+f' Current local time: {now:%A %d %B %Y, %H:%M %Z}.']
+      '--append-system-prompt',PROMPT]
     if allowed:args+=['--allowedTools',','.join(allowed)]
     if resume:args+=['--resume',resume]
     return args
+
+def message(text):
+    # The time goes in the question, not the system prompt, so a process booted earlier is never stale.
+    now=datetime.now().astimezone()
+    return json.dumps({'type':'user','message':{'role':'user','content':f'Current local time: {now:%A %d %B %Y, %H:%M %Z}.\n\n'+text}})+'\n'
+
+# A lookup process booted ahead of time saves ~4 s per question (startup plus connecting to his accounts).
+SPARE={'process':None,'command':None,'born':0.0}
+SPARE_LOCK=threading.Lock()
+SPARE_TTL=1800   # recycle an unused one so account connections and the tool list stay fresh
+
+def warm_folder(core):
+    folder=core.DATA/'jobs'/'warm';folder.mkdir(parents=True,exist_ok=True,mode=0o700)
+    return folder
+
+def boot(core):
+    tools=known_tools(core)
+    if not available() or stale(core,tools):return
+    args=command(core,readonly(tools))
+    process=subprocess.Popen(args,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True,
+      start_new_session=True,bufsize=1,cwd=str(warm_folder(core)),env=clean_env())
+    with SPARE_LOCK:old=SPARE['process'];SPARE.update(process=process,command=args,born=time.time())
+    if old:codex_jobs.terminate(old)
+
+def take(core,args):
+    """The booted process if it was started with exactly these arguments and is still alive, else None."""
+    with SPARE_LOCK:
+        process,expected,born=SPARE['process'],SPARE['command'],SPARE['born']
+        SPARE.update(process=None,command=None)
+    if process and expected==args and process.poll() is None and time.time()-born<SPARE_TTL:
+        threading.Thread(target=boot,args=(core,),daemon=True).start()   # the next question gets one too
+        return process
+    if process:codex_jobs.terminate(process)
+    return None
+
+def keep_warm(core):
+    """Keep one booted lookup process ready; replace it when it dies or grows old."""
+    def loop():
+        while True:
+            with SPARE_LOCK:process,born=SPARE['process'],SPARE['born']
+            if not process or process.poll() is not None or time.time()-born>=SPARE_TTL:
+                try:boot(core)
+                except Exception:pass
+            time.sleep(60)
+    threading.Thread(target=loop,daemon=True).start()
 
 def humanize(tool):
     parts=tool.split('__')
@@ -133,10 +178,13 @@ def run(core,job,approved=None):
         else:
             prompt='Task from Zack:\n'+job['task']
             resume=None
+        args=command(core,allowed,resume)
+        ready=None if approved else take(core,args)
         state={}
         codex_jobs.progress(core,job['id'],'Carrying out the approved action.' if approved else 'Working on it in the background.')
-        process=codex_jobs.execute_worker(core,job,command(core,allowed,resume),prompt,directory,
-          prefix='approved-' if approved else '',limit=settings(core)['time_limit'],cwd=workspace,env=clean_env(),parse=parser(core,job,state))
+        if ready:codex_jobs.progress(core,job['id'],'Using the lookup that was already warmed up.')
+        process=codex_jobs.execute_worker(core,job,args,message(prompt),directory,
+          prefix='approved-' if approved else '',limit=settings(core)['time_limit'],cwd=workspace,env=clean_env(),parse=parser(core,job,state),ready=ready)
         with codex_jobs.LOCK:
             if codex_jobs.get_job(core,job['id'])['status']!='running':return
             result=state.get('result') or {}

@@ -668,6 +668,7 @@ if __name__=='__main__':
         codex_jobs.restore_remote_preview(sys.modules[__name__])
     warm_models()
     scheduler.start(sys.modules[__name__])
+    assistant_jobs.keep_warm(sys.modules[__name__])
     phone_server=phone.start(sys.modules[__name__])
     threading.Thread(target=phone.warm,args=(sys.modules[__name__],HANDOFF_ACKS),daemon=True).start()
     print(f'AI Voice Agent · http://127.0.0.1:{PORT} · Ctrl-C to stop',flush=True)

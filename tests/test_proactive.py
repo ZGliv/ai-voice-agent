@@ -155,6 +155,32 @@ class LookupAnswerTests(unittest.TestCase):
     with c.connect() as db:self.assertEqual(db.execute("SELECT COUNT(*) FROM codex_jobs").fetchone()[0],1)
    finally:c.DATA=old
 
+class WarmLookupTests(unittest.TestCase):
+ def setUp(self):
+  self.addCleanup(lambda:assistant_jobs.SPARE.update(process=None,command=None,born=0.0))
+ def spare(self,args,born=None):
+  import subprocess
+  process=subprocess.Popen(['sleep','30'],stdin=subprocess.PIPE,start_new_session=True)
+  self.addCleanup(lambda:codex_jobs.terminate(process))
+  assistant_jobs.SPARE.update(process=process,command=args,born=born or time.time())
+  return process
+ def test_booted_process_is_used_once_and_replaced(self):
+  process=self.spare(['claude','a'])
+  with patch.object(assistant_jobs,'boot') as boot:
+   self.assertIs(assistant_jobs.take(Core,['claude','a']),process)
+   time.sleep(.1);boot.assert_called_once()
+   self.assertIsNone(assistant_jobs.take(Core,['claude','a']))   # never handed out twice
+ def test_mismatched_or_old_process_is_discarded(self):
+  for args,born in [(['claude','other-tools'],None),(['claude','a'],time.time()-assistant_jobs.SPARE_TTL-1)]:
+   process=self.spare(args,born)
+   self.assertIsNone(assistant_jobs.take(Core,['claude','a']))
+   self.assertIsNotNone(process.poll())   # stopped, not leaked
+ def test_question_carries_the_current_time(self):
+  line=json.loads(assistant_jobs.message('Task from Zack:\nAny new email?'))
+  self.assertEqual(line['type'],'user')
+  self.assertIn(datetime.now().strftime('%A'),line['message']['content'])
+  self.assertTrue(line['message']['content'].endswith('Any new email?'))
+
 class StripeTests(unittest.TestCase):
  def setUp(self):
   catalog=patch('project_memory.catalog',return_value=[]);catalog.start();self.addCleanup(catalog.stop)
