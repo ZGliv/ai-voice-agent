@@ -20,6 +20,9 @@ def message(job):
     if job['status']=='completed':
         if job.get('error'):return 'The task finished, but its checks need attention. Ask me for the details.'
         if job['project_id']=='__research__':return 'Your research report is ready. Ask me what I found.'
+        if job.get('branch'):
+            who='Claude Code' if job.get('engine')=='claude' else 'Codex'
+            return f"{who} has finished {job['task'].splitlines()[0][:80].rstrip('.')}. It's on its own branch, ready for you to review."
         if job.get('preview_dir'):return 'Your website preview is ready. You can review it in your task history.'
         return 'Your task has finished. The report is ready for review.'
     if job['status']=='cancelled':return 'The task has been cancelled.'

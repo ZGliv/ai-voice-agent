@@ -13,7 +13,7 @@ PREVIOUS_WATCH='Check Zack\'s email and calendar for anything new since {since} 
 STOP=threading.Event()
 DEFAULTS=[
  {'id':'morning-briefing','kind':'task','label':'Morning briefing','repeat':'daily','at':'07:30','window':'','deliver':'telegram','quiet':0,
-  'task':'Morning briefing for Zack: today\'s calendar events with times and locations, important unread emails that need a reply or action, and anything due today. Lead with the single most important thing. Keep it tight.'},
+  'task':'Morning briefing for Zack: today\'s calendar events with times and locations, important unread emails that need a reply or action, and anything due today. Lead with the single most important thing. Keep it tight. '+briefing.TASK},
  {'id':'inbox-watch','kind':'task','label':'Inbox watch','repeat':'30min','at':'','window':'08:00-22:00','deliver':'telegram','quiet':1,
   'task':'Check Zack\'s email and calendar for anything new since {since} that genuinely needs his attention: a reply from a real person, a deadline, a meeting change, a payment or security alert. Ignore newsletters, promotions, job-board alerts and automatic application confirmations. '
    'If nothing qualifies, reply with exactly NOTHING. '
@@ -23,7 +23,7 @@ DEFAULTS=[
    'For everything else that qualifies, write a short Telegram summary instead. '+briefing.TASK},
 ]
 # Earlier built-in wording, upgraded in place so an untouched default picks up improvements.
-RETIRED={'inbox-watch':[PREVIOUS_WATCH,'Check Zack\'s email and calendar for anything new since {since} that genuinely needs his attention: a reply from a real person, a deadline, a meeting change, a payment or security alert. Ignore newsletters, promotions and routine notifications. If nothing qualifies, reply with exactly NOTHING. If something needs action within two hours, begin your answer with URGENT:']}
+RETIRED={'morning-briefing':['Morning briefing for Zack: today\'s calendar events with times and locations, important unread emails that need a reply or action, and anything due today. Lead with the single most important thing. Keep it tight.'],'inbox-watch':[PREVIOUS_WATCH,'Check Zack\'s email and calendar for anything new since {since} that genuinely needs his attention: a reply from a real person, a deadline, a meeting change, a payment or security alert. Ignore newsletters, promotions and routine notifications. If nothing qualifies, reply with exactly NOTHING. If something needs action within two hours, begin your answer with URGENT:']}
 
 def initialize(db):
     db.execute('''CREATE TABLE IF NOT EXISTS schedules(id TEXT PRIMARY KEY,kind TEXT NOT NULL,label TEXT NOT NULL,task TEXT NOT NULL,

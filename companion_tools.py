@@ -15,7 +15,7 @@ TOOLS=[
  schema('update_memory','Correct the wording of one existing saved decision or next step ONLY when Zack explicitly requests a correction. First read_memory in this turn and use its exact ID. Preserve other facts; ask which item or wording if ambiguous. Do not create a duplicate with save_memory.',{'memory_id':STRING,'content':STRING},['memory_id','content']),
  schema('set_next_step_status','Mark one saved next step done, or reopen it, ONLY when Zack explicitly requests that update. First use read_memory in this turn to identify its exact ID. Ask which step if ambiguous. Decisions cannot be completed.',{'memory_id':STRING,'status':{'type':'string','enum':['open','done']}},['memory_id','status']),
  schema('prepare_codex_job','Prepare a specific coding task ONLY when Zack asks to have Codex do work. User must tap Start in the job card before it runs. Never claim it has started.',{'task':STRING},['task']),
- schema('start_codex_job','Start a coding task in the selected project immediately, ONLY when Zack explicitly asks to build, implement, fix or have Codex do the work. No separate button is needed.',{'task':STRING},['task']),
+ schema('start_codex_job','Start a coding task on one of his projects immediately, ONLY when Zack explicitly asks to build, implement, fix or start work ("spin up Claude Code on Parl.ai to fix the signup bug"). It runs unattended in a separate copy on its own git branch, never pushes, and tells him when done. project_id: exact catalog ID; omit to use the selected project. engine: claude for Claude Code (the default), codex only when he says Codex. Include the complete task.',{'task':STRING,'project_id':STRING,'engine':{'type':'string','enum':['claude','codex']}},['task']),
  schema('build_website','Build a NEW standalone website from an explicit user request. Creates a separate local project, streams progress, and opens the finished site on the Mac. Include the complete brief. Use start_codex_job for changes to an existing selected project.',{'task':STRING},['task']),
  schema('research_task','Start a background research task ONLY when Zack explicitly asks you to research, investigate, compare options, or find current information. Uses public web sources and saves a cited report. No selected project is needed. Include the complete question and constraints.',{'task':STRING},['task']),
  schema('continue_job','Continue or revise a previous stopped job when Zack explicitly requests a follow-up. First identify the exact job ID using job_status. Copies its saved work into a separate workspace and preserves the original. Use this instead of building a new site when asked to change something already built.',{'job_id':STRING,'task':STRING},['job_id','task']),
@@ -28,6 +28,7 @@ TOOLS=[
  schema('list_schedules','List reminders and recurring tasks (morning briefing, inbox watch) with their IDs, times, delivery and whether they are on.',{},[]),
  schema('change_schedule','Turn a schedule on or off, delete it, or change its delivery or time, ONLY when Zack asks. First call list_schedules in this turn for the exact ID.',{'schedule_id':STRING,'action':{'type':'string','enum':['enable','disable','delete','update']},'deliver':{'type':'string','enum':['telegram','call']},'at':STRING},['schedule_id','action']),
  schema('remember','Remember a lasting fact about Zack for future conversations: a person and their role, a preference, a commitment, or something he is waiting on. Use when he asks you to remember something personal, or states a lasting preference ("I prefer morning interviews"). Not for project decisions (use save_memory) or anything trivial. One short sentence about Zack.',{'fact':STRING},['fact']),
+ schema('overnight_rundown','Get the rundown of what changed: commits in each of his linked projects, coding and research jobs that finished (with their branches), and his day (job search, Parl.ai, Notion, email). Use when he asks for the rundown, what happened overnight or today, or to catch him up. hours: how far back; omit for overnight (since 6 pm yesterday) in the morning or the last 12 hours later on.',{'hours':{'type':'integer','minimum':1,'maximum':72}},[]),
  schema('job_status','Read real job status. Without query returns five newest jobs. Use query with a few distinctive words from a task or project to search ALL saved history, including older builds. Every word must match; use fewer words if no results.',{'query':STRING},[])]
 
 CHARACTER=('You are J.A.R.V.I.S., Zack\'s AI, in the spirit of Tony Stark\'s assistant from the Iron Man and Avengers films. '
@@ -108,6 +109,10 @@ def execute(core,item,name,args):
             result=json.loads(prior[0])
             return codex_jobs.get_job(core,result['id']) if name in {'start_codex_job','build_website','research_task','continue_job','delegate_task'} else result
         pid=project_memory.project_id(db,item['conversation_id'])
+        if name=='overnight_rundown':
+            import rundown
+            hours=args.get('hours') if isinstance(args.get('hours'),int) and 1<=args.get('hours')<=72 else None
+            return rundown.gather(core,hours)
         if name=='remember':
             import personal_memory
             return personal_memory.store(core,db,args.get('fact'))
@@ -210,7 +215,9 @@ def execute(core,item,name,args):
             result=launcher(core,args.get('task'),item['id'])
             db.execute('INSERT OR REPLACE INTO voice_tool_results VALUES(?,?,?)',(item['id'],name,json.dumps(result)))
             return result
-        if not pid:raise core.Problem('Choose a project first, or tell me which project this concerns.')
+        if not pid and not (name=='start_codex_job' and args.get('project_id')):
+            if name=='start_codex_job':raise core.Problem('Say which project. Linked projects: '+', '.join(codex_jobs.projects(core)))
+            raise core.Problem('Choose a project first, or tell me which project this concerns.')
         if name=='read_memory':
             query=args.get('query','')
             if not isinstance(query,str) or len(query)>200:raise core.Problem('Use a short memory search of up to 200 characters.')
@@ -270,7 +277,10 @@ def execute(core,item,name,args):
             return result
         elif name in {'prepare_codex_job','start_codex_job'}:
             # Separate connection; no write transaction has started here.
-            result=codex_jobs.draft(core,pid,args.get('task'),item['id'])
+            target=args.get('project_id') if name=='start_codex_job' and isinstance(args.get('project_id'),str) and args.get('project_id') else pid
+            if not target:raise core.Problem('Say which project. Linked projects: '+', '.join(codex_jobs.projects(core)))
+            engine=args.get('engine') if args.get('engine') in codex_jobs.ENGINES else ('claude' if name=='start_codex_job' else 'codex')
+            result=codex_jobs.draft(core,target,args.get('task'),item['id'],engine=engine)
             if name=='start_codex_job':result=codex_jobs.start_job(core,result['id'])
         db.execute('INSERT OR REPLACE INTO voice_tool_results VALUES(?,?,?)',(item['id'],name,json.dumps(result)))
         return result

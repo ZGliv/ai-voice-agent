@@ -93,7 +93,8 @@ class ToolTests(unittest.TestCase):
   self.assertNotIn('Build the requested website',instructions)
 
  def test_active_job_is_not_hidden_by_newer_drafts(self):
-  first=jobs.draft(c,'__research__','Research first',None);jobs.update(c,first['id'],status='running')
+  for _ in range(jobs.CODING_PARALLEL):
+   first=jobs.draft(c,'__research__','Research first',None);jobs.update(c,first['id'],status='running')
   for _ in range(41):last=jobs.draft(c,'__research__','Research later',None)
   with self.assertRaises(c.Problem) as error:jobs.start_job(c,last['id'])
   self.assertEqual(error.exception.status,409)

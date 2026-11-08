@@ -10,7 +10,7 @@ from datetime import datetime
 
 FRESH=45*60     # older than this, a question goes to a live lookup instead
 LINE=re.compile(r'^\W*BRIEFING:(.*)$',re.M)
-FIELDS={'headline','applications_today','application_companies','waiting_on_you','next_events','parl_ai','opener'}
+FIELDS={'notion_recent','headline','applications_today','application_companies','waiting_on_you','next_events','parl_ai','opener'}
 LOCK=threading.Lock()
 
 def path(data):
@@ -70,6 +70,6 @@ def peek_opener(data,now=None):
 TASK=('Finally, whatever you found above, end with exactly one more line: BRIEFING: followed by a one-line JSON object about his whole day so far (not only since {since}), with these keys: '
   '"headline" (one sentence, the most important thing today), "applications_today" (number of job applications he submitted today, from confirmation emails since midnight local time), '
   '"application_companies" (up to 8 company names), "waiting_on_you" (up to 4 short strings: real people or deadlines needing his reply or action), '
-  '"next_events" (up to 4 short strings with time and title, today and tomorrow), "parl_ai" (one short sentence on Parl.ai if a read-only tool shows it, such as the latest Vercel deployment, otherwise null), '
+  '"next_events" (up to 4 short strings with time and title, today and tomorrow), "notion_recent" (up to 3 short strings: Notion pages changed in the last day and what changed, if Notion is available), "parl_ai" (one short sentence on Parl.ai if a read-only tool shows it, such as the latest Vercel deployment, otherwise null), '
   '"opener" (what JARVIS should say first when Zack next calls him: at most two short spoken sentences of the most useful news, dry and warm, then a short "What can I do?" style question, '
   'for example "Evening. Twenty-five applications today, and Veeva\'s assessment is due Tuesday. What can I do for you?"). Use null or [] when unknown; never guess.')

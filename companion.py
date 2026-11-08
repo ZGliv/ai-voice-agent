@@ -61,7 +61,7 @@ def needs_tools(text):
     # Keep explicit actions and personal/project facts out of the speech-only path.
     # This is a conservative guard, not an authorization mechanism; tools still
     # enforce their own project scope and consent checks.
-    return bool(re.search(r"\b(save|remember|recall|forget|memory|decid(?:e|ed|ing)|decision|agree|agreed|project|parlay|parlai|codex|claude|job|task|status|build|implement|create|make|edit|fix|change|update|delete|remove|open|launch|start|run|stop|cancel|resume|deploy|publish|send|search|research|look up|look at|check|latest|current|today|weather|news|calendar|email|emails|inbox|meeting|meetings|schedule|remind|reminder|notion|drive|doc|docs|text me|call me|message|tomorrow|tonight|yes|yeah|approve|go ahead|do it|send it|book it|decline|don't|my|our)\b|\b(?:we|I) (?:did|said|left|agreed|chose)\b|^(?:please )?pause\b|\bpause (?:listening|the conversation)\b",text,re.I))
+    return bool(re.search(r"\b(save|remember|recall|forget|memory|decid(?:e|ed|ing)|decision|agree|agreed|project|parlay|parlai|codex|claude|job|task|status|build|implement|create|make|edit|fix|change|update|delete|remove|open|launch|start|run|stop|cancel|resume|deploy|publish|send|search|research|look up|look at|check|latest|rundown|overnight|catch me up|what happened|spin up|get started|kick off|current|today|weather|news|calendar|email|emails|inbox|meeting|meetings|schedule|remind|reminder|notion|drive|doc|docs|text me|call me|message|tomorrow|tonight|yes|yeah|approve|go ahead|do it|send it|book it|decline|don't|my|our)\b|\b(?:we|I) (?:did|said|left|agreed|chose)\b|^(?:please )?pause\b|\bpause (?:listening|the conversation)\b",text,re.I))
 
 ACCOUNT_DATA=re.compile(r"\b(calendar|schedule|agenda|email|emails|e-mail|inbox|gmail|mail|unread|meeting|meetings|appointment|appointments|notion|google drive|my drive|my docs?|my documents)\b",re.I)
 # Tools that genuinely consult or act on Zack's accounts/schedules; any other answer about them is invented.
@@ -75,7 +75,7 @@ def quick_lookup(text):
     return bool(LOOKUP_TOPIC.search(text) and LOOKUP_ASK.search(text) and not LOOKUP_ACTION.search(text))
 
 HANDOFF_ACKS=['Let me have a look.','Checking now.','Give me a moment to pull that up.','On it. I’ll come back to you shortly.','Looking into it now.']
-HANDOFF_TOOLS={'delegate_task','schedule_task','list_schedules','change_schedule','job_status','read_job_result','approve_job','cancel_job','pause_listening'}
+HANDOFF_TOOLS={'overnight_rundown','delegate_task','schedule_task','list_schedules','change_schedule','job_status','read_job_result','approve_job','cancel_job','pause_listening'}
 
 def warm_reasoning():
     if brain.config(DATA):return  # Cloud brain: leave the ~6.5 GB local model unloaded.
