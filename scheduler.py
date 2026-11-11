@@ -17,6 +17,7 @@ DEFAULTS=[
  {'id':'inbox-watch','kind':'task','label':'Inbox watch','repeat':'30min','at':'','window':'08:00-22:00','deliver':'telegram','quiet':1,
   'task':'Check Zack\'s email and calendar for anything new since {since} that genuinely needs his attention: a reply from a real person, a deadline, a meeting change, a payment or security alert. Ignore newsletters, promotions, job-board alerts and automatic application confirmations. '
    'If nothing qualifies, reply with exactly NOTHING. '
+   'If you cannot read his email at all (tools blocked, not connected, or failing), reply with exactly UNAVAILABLE: and the reason in one sentence, and nothing else: no BRIEFING line. Never report an empty inbox you could not read. '
    'Phone him (begin your answer with URGENT:) when it is worth interrupting him: a recruiter or employer replying about an interview, an offer or next steps; anything that needs action within two hours; a calendar event starting in the next 45 minutes that changed or that he may not know about; a security or payment alert. '
    'After URGENT:, write exactly what JARVIS should say when Zack picks up: one or two short spoken sentences with the news (who and what, no email addresses or links), then one concrete offer of the next step you could take, such as "Shall I draft a reply suggesting Tuesday at ten?". '
    'When a real person (a recruiter, an employer, a client) wrote and clearly expects a reply, save a short draft reply in Gmail now (saving a draft is allowed; never send) and make the offer "I\'ve drafted a reply saying ... Shall I send it?". Draft nothing else and send nothing. '
@@ -113,13 +114,42 @@ def deliver(core,row,text,urgent=False):
         except Exception:pass
     return notify.send(core,('URGENT · ' if urgent else '')+row['label']+'\n\n'+text) or sent
 
+UNAVAILABLE=re.compile(r"^\W*UNAVAILABLE\b|\b(?:couldn'?t|could not|can'?t|cannot|unable to) (?:check|reach|read|access) your (?:email|inbox|calendar|accounts)",re.I)
+RETRY_AFTER=300    # a check that could not read his email is tried again this soon, once
+ALERT_AFTER=3      # consecutive failed checks before he is told, once
+
+def watch_state(core,**changes):
+    path=core.DATA/'watch-state.json'
+    try:state=json.loads(path.read_text())
+    except (OSError,ValueError):state={}
+    if changes:
+        state.update(changes);path.write_text(json.dumps(state))
+    return state
+
+def unavailable(core,row,text):
+    """A check that could not read his accounts: keep the last good briefing, retry soon, tell him once."""
+    import notify
+    state=watch_state(core);failures=int(state.get('failures',0))+1
+    watch_state(core,failures=failures,last_failure=time.time())
+    if failures==1 and row['repeat']!='once':
+        with core.connect() as db:db.execute('UPDATE schedules SET next_run=MIN(next_run,?) WHERE id=?',(time.time()+RETRY_AFTER,row['id']))
+    if failures==ALERT_AFTER and not state.get('alerted'):
+        watch_state(core,alerted=True)
+        notify.send(core,'I have not been able to read your email for the last '+str(failures)+' checks, so I may be missing things. Reason given: '+re.sub(r'^\W*UNAVAILABLE\W*','',text)[:300]+'\n\nI will keep trying and tell you when it is working again.')
+
 def job_done(core,job):
     """Deliver a finished scheduled assistant task."""
     sid=job.get('source_turn_id','').split(':')[1]
     with core.connect() as db:row=db.execute('SELECT * FROM schedules WHERE id=?',(sid,)).fetchone()
     if not row:return
     text,known=briefing.split((job.get('result') or '').strip())
-    if known is not None and job['status']=='completed':
+    if row['quiet'] and (job['status']!='completed' or UNAVAILABLE.search(text[:400])):
+        return unavailable(core,row,text or job.get('error') or 'the check did not finish')
+    if row['quiet'] and watch_state(core).get('failures'):
+        import notify
+        if watch_state(core).get('alerted'):notify.send(core,'I can read your email again. Back to normal.')
+        watch_state(core,failures=0,alerted=False)
+    if known is not None and job['status']=='completed' and not UNAVAILABLE.search(text[:400]):
         briefing.save(core.DATA,known)
         import phone
         # Render the call opener now so it plays the instant he next calls.

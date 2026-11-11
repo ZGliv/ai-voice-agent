@@ -8,9 +8,12 @@ import json, re, threading, time, uuid
 
 LIMIT=40          # kept facts; the oldest fall away
 SHOWN=25          # facts given to the brain each turn
-REVIEW=('Below is a phone call between Zack and his assistant JARVIS. List at most 3 facts worth remembering for future calls: '
-  'people in his life or work and their role, his stated preferences, commitments he made, or things he is waiting on. '
-  'Each fact is one short sentence written about "Zack". Skip anything trivial, temporary to this call, already known, or that you are unsure of. '
+REVIEW=('Below is a phone call between Zack and his assistant JARVIS, transcribed by speech recognition (names may be misheard). '
+  'List at most 2 facts worth remembering for future calls, only from things Zack himself clearly stated: '
+  'a named person and their role in his life or work, a lasting preference, a commitment or deadline he took on, or something specific he is waiting on. '
+  'Each fact is one short sentence written about "Zack". '
+  'Do not record: anything about JARVIS or how the call went; that a project exists or its status; things JARVIS said, guessed or could not find; '
+  'requests he made on this call; anything with a name or word that looks misheard; anything you would not bet on. Most calls have nothing worth keeping. '
   'Reply with only a JSON array of strings, or [] if nothing qualifies.\n\nAlready known:\n')
 
 def initialize(db):
@@ -48,7 +51,7 @@ def review_call(core,conversation):
           {'role':'user','content':transcript}],'options':{'num_predict':300}},threading.Event(),lambda text:None)
         found=json.loads(re.search(r'\[.*\]',reply.get('content') or '[]',re.S)[0])
         kept=[]
-        for fact in found[:3] if isinstance(found,list) else []:
+        for fact in found[:2] if isinstance(found,list) else []:
             if isinstance(fact,str):
                 try:kept.append(remember(core,fact,'call')['remembered'])
                 except Exception:pass

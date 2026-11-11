@@ -59,19 +59,41 @@ def verb(action):
         if READ_VERB.match(rest) or WRITE_WORD.match(rest):return rest
     return action
 
+TOOLS_LOCK=threading.Lock()
+TOOL_MEMORY=14*86400   # a tool name not seen for two weeks is forgotten
+
 def stale(core,tools):
-    # A list cached while signed out has no account connectors; refresh it (and at least every 6 hours).
-    path=core.DATA/'assistant-tools.json'
-    connectors=[t for t in tools if t.startswith('mcp__') and 'telegram' not in t]
-    return not connectors or not path.is_file() or time.time()-path.stat().st_mtime>6*3600
+    # Nothing known about his account connectors yet (first run, or signed out): look before running.
+    return not [t for t in tools if t.startswith('mcp__') and 'telegram' not in t]
+
+def seen_tools(core):
+    try:saved=json.loads((core.DATA/'assistant-tools.json').read_text())
+    except (OSError,ValueError):return {}
+    if isinstance(saved,list):return {name:time.time() for name in saved if isinstance(name,str)}   # earlier format
+    seen=saved.get('seen') if isinstance(saved,dict) else None
+    return {k:v for k,v in seen.items() if isinstance(k,str) and isinstance(v,(int,float))} if isinstance(seen,dict) else {}
 
 def known_tools(core):
-    try:return json.loads((core.DATA/'assistant-tools.json').read_text())
-    except (OSError,ValueError):return []
+    cutoff=time.time()-TOOL_MEMORY
+    return sorted(name for name,when in seen_tools(core).items() if when>=cutoff)
+
+def remember_tools(core,tools):
+    """Add tool names to what Jarvis knows. The list only grows: a run that starts before Gmail or Notion
+    has finished connecting reports a partial list, and replacing the cache with it locked lookups out."""
+    now=time.time()
+    with TOOLS_LOCK:
+        seen={k:v for k,v in seen_tools(core).items() if now-v<TOOL_MEMORY}
+        seen.update({name:now for name in tools if isinstance(name,str)})
+        path=core.DATA/'assistant-tools.json';pending=path.with_suffix('.pending')
+        pending.write_text(json.dumps({'seen':seen}));os.chmod(pending,0o600);pending.replace(path)
+    return sorted(seen)
 
 def clean_env():
     # Never inherit a parent Claude session's proxy/auth; the CLI must use its own login.
-    return {k:v for k,v in os.environ.items() if not k.startswith(('ANTHROPIC_','CLAUDE_CODE_','CLAUDECODE','CLAUDE_AGENT_SDK'))}
+    env={k:v for k,v in os.environ.items() if not k.startswith(('ANTHROPIC_','CLAUDE_CODE_','CLAUDECODE','CLAUDE_AGENT_SDK'))}
+    # A connector call that hangs fails in 30 s instead of stalling the whole lookup for nine minutes.
+    env['CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT']='30000';env['MCP_TOOL_TIMEOUT']='60000'
+    return env
 
 def command(core,allowed,resume=None):
     # The prompt arrives as one stream-json message, so a process can boot before the question exists.
@@ -142,9 +164,7 @@ def parser(core,job,state):
         if kind=='system' and event.get('subtype')=='init':
             state['session_id']=event.get('session_id','')
             codex_jobs.update(core,job['id'],session_id=state['session_id'])
-            tools=event.get('tools') or []
-            if tools:
-                path=core.DATA/'assistant-tools.json';path.write_text(json.dumps(tools));os.chmod(path,0o600)
+            remember_tools(core,event.get('tools') or [])
         elif kind=='assistant':
             for block in (event.get('message') or {}).get('content') or []:
                 if block.get('type')=='tool_use':
@@ -169,43 +189,55 @@ def run(core,job,approved=None):
         if stale(core,tools):
             codex_jobs.progress(core,job['id'],'Checking which of your accounts are connected.')
             tools=discover(core)
-        allowed=readonly(tools)
-        if approved:
-            allowed+= [a['tool'] for a in approved if a['tool'] not in allowed]
-            prompt=('Zack has approved exactly these actions, which were blocked earlier: '+json.dumps(approved)+
-              '. Perform exactly these actions with the same inputs, and nothing else. Then give the short spoken-style confirmation of what was done.')
-            resume=codex_jobs.get_job(core,job['id']).get('session_id') or None
-        else:
-            prompt='Task from Zack:\n'+job['task']
-            resume=None
-        args=command(core,allowed,resume)
-        ready=None if approved else take(core,args)
-        state={}
-        codex_jobs.progress(core,job['id'],'Carrying out the approved action.' if approved else 'Working on it in the background.')
-        if ready:codex_jobs.progress(core,job['id'],'Using the lookup that was already warmed up.')
-        process=codex_jobs.execute_worker(core,job,args,message(prompt),directory,
-          prefix='approved-' if approved else '',limit=settings(core)['time_limit'],cwd=workspace,env=clean_env(),parse=parser(core,job,state),ready=ready)
-        with codex_jobs.LOCK:
-            if codex_jobs.get_job(core,job['id'])['status']!='running':return
-            result=state.get('result') or {}
-            text=str(result.get('result') or '').strip()[:30000]
-            if process is None or result.get('is_error') or not text:
-                failure=text if 'authenticate' in text.lower() or 'login' in text.lower() else ''
-                codex_jobs.update(core,job['id'],status='failed',result=text,
-                  error='Claude Code needs you to sign in again: run claude, then /login.' if failure else 'The assistant did not finish. Check its log for limits or sign-in problems.')
-                return
-            denials=[{'tool':d.get('tool_name',''),'action':humanize(d.get('tool_name','')),'input':d.get('tool_input',{})}
-              for d in result.get('permission_denials') or [] if d.get('tool_name')]
-            cost=result.get('total_cost_usd')
-            if denials and (job.get('source_turn_id') or '').startswith('schedule:'):
-                # A background watch never waits on approval; it reports what it could read.
-                denials=[]
-            if denials:
-                codex_jobs.update(core,job['id'],status='awaiting_approval',result=text,approval=json.dumps({'actions':denials[:5],'requested':time.time()}))
-                codex_jobs.progress(core,job['id'],'Waiting for your approval: '+'; '.join(d['action'] for d in denials[:5]))
+        for attempt in (0,1):
+            allowed=readonly(known_tools(core) or tools)
+            if approved:
+                allowed+= [a['tool'] for a in approved if a['tool'] not in allowed]
+                prompt=('Zack has approved exactly these actions, which were blocked earlier: '+json.dumps(approved)+
+                  '. Perform exactly these actions with the same inputs, and nothing else. Then give the short spoken-style confirmation of what was done.')
+                resume=codex_jobs.get_job(core,job['id']).get('session_id') or None
             else:
-                codex_jobs.update(core,job['id'],status='completed',result=text,approval='{}')
-                codex_jobs.progress(core,job['id'],'Done.'+(f' (plan usage ≈ ${cost:.3f})' if isinstance(cost,(int,float)) else ''))
+                prompt='Task from Zack:\n'+job['task']
+                resume=None
+            args=command(core,allowed,resume)
+            ready=None if approved else take(core,args)
+            state={}
+            codex_jobs.progress(core,job['id'],'Carrying out the approved action.' if approved else 'Working on it in the background.')
+            if ready:codex_jobs.progress(core,job['id'],'Using the lookup that was already warmed up.')
+            process=codex_jobs.execute_worker(core,job,args,message(prompt),directory,
+              prefix='approved-' if approved else '',limit=settings(core)['time_limit'],cwd=workspace,env=clean_env(),parse=parser(core,job,state),ready=ready)
+            with codex_jobs.LOCK:
+                if codex_jobs.get_job(core,job['id'])['status']!='running':return
+                result=state.get('result') or {}
+                text=str(result.get('result') or '').strip()[:30000]
+                if process is None or result.get('is_error') or not text:
+                    failure=text if 'authenticate' in text.lower() or 'login' in text.lower() else ''
+                    codex_jobs.update(core,job['id'],status='failed',result=text,
+                      error='Claude Code needs you to sign in again: run claude, then /login.' if failure else 'The assistant did not finish. Check its log for limits or sign-in problems.')
+                    if (job.get('source_turn_id') or '').startswith('schedule:'):
+                        # A watch that never finished still counts as a failed check (retry, and tell him if it keeps happening).
+                        threading.Thread(target=notify_done,args=(core,codex_jobs.get_job(core,job['id'])),daemon=True).start()
+                    return
+                blocked=[d.get('tool_name','') for d in result.get('permission_denials') or [] if d.get('tool_name')]
+                mistaken=[name for name in blocked if name not in allowed and readonly([name])]
+                if mistaken and not approved and attempt==0:
+                    # A read-only tool Jarvis had not seen yet was refused. Learn it and run once more.
+                    remember_tools(core,mistaken)
+                    codex_jobs.progress(core,job['id'],'A read-only tool was blocked by mistake. Trying again.')
+                    continue
+                denials=[{'tool':d.get('tool_name',''),'action':humanize(d.get('tool_name','')),'input':d.get('tool_input',{})}
+                  for d in result.get('permission_denials') or [] if d.get('tool_name')]
+                cost=result.get('total_cost_usd')
+                if denials and (job.get('source_turn_id') or '').startswith('schedule:'):
+                    # A background watch never waits on approval; it reports what it could read.
+                    denials=[]
+                if denials:
+                    codex_jobs.update(core,job['id'],status='awaiting_approval',result=text,approval=json.dumps({'actions':denials[:5],'requested':time.time()}))
+                    codex_jobs.progress(core,job['id'],'Waiting for your approval: '+'; '.join(d['action'] for d in denials[:5]))
+                else:
+                    codex_jobs.update(core,job['id'],status='completed',result=text,approval='{}')
+                    codex_jobs.progress(core,job['id'],'Done.'+(f' (plan usage ≈ ${cost:.3f})' if isinstance(cost,(int,float)) else ''))
+            break
         notify_done(core,codex_jobs.get_job(core,job['id']))
     except Exception:
         if codex_jobs.get_job(core,job['id'])['status'] not in {'cancelled','failed'}:
@@ -222,9 +254,7 @@ def discover(core):
         for line in out.stdout.splitlines():
             event=json.loads(line)
             if event.get('type')=='system' and event.get('subtype')=='init':
-                tools=event.get('tools') or []
-                path=core.DATA/'assistant-tools.json';path.write_text(json.dumps(tools));os.chmod(path,0o600)
-                return tools
+                return remember_tools(core,event.get('tools') or [])
     except Exception:pass
     return []
 

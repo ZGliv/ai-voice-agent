@@ -27,7 +27,7 @@ PENDING={}    # one-time stream token -> {'conversation','opening','expires'}
 LIVE={}       # conversation id -> Call
 LOCK=threading.Lock()
 GOODBYE=re.compile(r"\W*(?:(?:ok(?:ay)?,? )?(?:good)?bye(?: now)?|that'?s all|hang up|(?:thanks|thank you),? (?:good)?bye)(?:,? jarvis)?\W*",re.I)
-LINES=['Yes, sir?','Bear with me. I am still waking up.','Bear with me.','Very good, sir.','I shall leave you to it.','I could not finish that one. Please try again.']
+LINES=['I have sent you the details by text.','Yes, sir?','Bear with me. I am still waking up.','Bear with me.','Very good, sir.','I shall leave you to it.','I could not finish that one. Please try again.']
 HOLD_AFTER=7.0   # only a genuinely slow reply earns "Bear with me."
 IDLE_LIMIT=60    # seconds of nobody talking before Jarvis hangs up
 CHUNK=3840       # 80 ms of 24 kHz PCM16 per recognition step (one Kyutai frame)
@@ -43,6 +43,8 @@ PROGRESS={'gmail':'Going through your inbox now.','notion':'Checking your Notion
 PROGRESS_GAP=5.0 # seconds of Jarvis silence before a progress line is worth saying
 WAKING=(8,22)    # proactive calls only ring between these hours; otherwise Telegram
 SEEN_EVENTS=set()
+# His carrier's voicemail greeting, as the recognizer hears it. Only checked on calls Jarvis placed.
+VOICEMAIL=re.compile(r"forwarded to (?:an automated )?voice ?mail|at the tone|after the (?:tone|beep)|record your message|leave (?:a|your) message|is not available|not available right now|mailbox (?:is full|of)",re.I)
 EAGER=0.5        # Deepgram's early "probably finished" signal; the reply starts then but plays only once he really has
 
 class Speculation:
@@ -122,14 +124,14 @@ def remember(core,conversation,opening):
         db.execute("INSERT INTO turns(id,conversation_id,source,status,input_text,output_text,created,updated) VALUES(?,?,'phone','complete',?,?,?,?)",
           (uuid.uuid4().hex,conversation,'(Jarvis phoned Zack.)',opening,now,now))
 
-def stream_twiml(core,settings,conversation,opening=None):
+def stream_twiml(core,settings,conversation,opening=None,outbound=False):
     try:audio=spoken(core,opening) if opening else None
     except Exception:audio=None
     token=secrets.token_hex(16)
     with LOCK:
         now=time.time()
         for key in [k for k,v in PENDING.items() if v['expires']<now]:PENDING.pop(key,None)
-        PENDING[token]={'conversation':conversation,'opening':audio,'expires':now+120}
+        PENDING[token]={'conversation':conversation,'opening':audio,'expires':now+120,'outbound':outbound}
     url='wss://'+urlparse(settings['public_url']).netloc+'/twilio/media'
     before=say(opening) if opening and not audio else ''
     return twiml(before+f'<Connect><Stream url={quoteattr(url)}><Parameter name="token" value="{token}"/></Stream></Connect>')
@@ -141,7 +143,7 @@ def call(core,text,conversation=None):
     if conversation:remember(core,conversation,text)
     else:conversation=new_conversation(core,'Phone call',text)
     body=urlencode({'To':settings['my_number'],'From':settings['from_number'],'Timeout':'25',
-      'Twiml':stream_twiml(core,settings,conversation,text)}).encode()
+      'Twiml':stream_twiml(core,settings,conversation,text,outbound=True)}).encode()
     auth=base64.b64encode(f"{settings['account_sid']}:{settings['auth_token']}".encode()).decode()
     request=Request(f"https://api.twilio.com/2010-04-01/Accounts/{settings['account_sid']}/Calls.json",data=body,
       headers={'Authorization':'Basic '+auth,'Content-Type':'application/x-www-form-urlencoded'})
@@ -187,6 +189,7 @@ class Call:
         self.generation=0;self.marks=0;self.played=0;self.sending=False;self.turn=None;self.busy=False
         self.heard=time.monotonic();self.done=threading.Event();self.lock=threading.Lock()
         self.last_spoke=time.monotonic();self.said=set();self.spec=None;self.turn_end=None
+        self.outbound=False;self.opening=None;self.answered=False
 
     # Outgoing audio
     def send_pcm(self,pcm,downsampler):
@@ -251,8 +254,26 @@ class Call:
             time.sleep(.04)
         if generation==self.generation:self.mark()
 
+    def voicemail(self,spec=None):
+        """Jarvis rang and got the voicemail greeting: leave the news after the tone and hang up."""
+        if spec:
+            # The greeting may still be playing; only act once it has really ended (the tone follows).
+            deadline=time.monotonic()+8
+            while not spec.confirm.is_set():
+                if spec.cancel.is_set() or time.monotonic()>deadline:return
+                time.sleep(.02)
+        log('voicemail answered; leaving the message')
+        with self.lock:self.generation+=1
+        self.socket.send({'event':'clear','streamSid':self.stream});self.played=self.marks;self.sending=False
+        time.sleep(1.2)   # the tone
+        if self.opening:self.play_wav(self.opening)
+        self.say_line('I have sent you the details by text.')
+        self.hang_up(after_playback=True)
+
     def answer(self,text,spec=None):
         core=self.core
+        if self.outbound and not self.answered and VOICEMAIL.search(text):return self.voicemail(spec)
+        self.answered=True
         if GOODBYE.fullmatch(text) and not spec:
             self.say_line('Very good, sir.');self.hang_up(after_playback=True);return
         with self.lock:self.generation+=1;generation=self.generation;self.said.clear()
@@ -460,6 +481,7 @@ class Call:
         with LOCK:LIVE[self.conversation]=self
         threads=[threading.Thread(target=self.listen,daemon=True),threading.Thread(target=self.worker,daemon=True)]
         for thread in threads:thread.start()
+        self.opening=opening
         try:
             if opening:self.play_wav(opening)
             if not hearing_key(self.core.DATA) and not self.core.STREAMING.ready:
@@ -518,7 +540,8 @@ class Bridge(BaseHTTPRequestHandler):
             if not state or state['expires']<time.time():log('stream refused: unknown or expired token');return socket.close()
             log('stream started',message.get('streamSid'))
             self.connection.settimeout(30)
-            Call(self.core,socket,message.get('streamSid') or message['start'].get('streamSid'),state['conversation']).run(state['opening'])
+            call=Call(self.core,socket,message.get('streamSid') or message['start'].get('streamSid'),state['conversation'])
+            call.outbound=bool(state.get('outbound'));call.run(state['opening'])
         except Closed:log('stream closed')
         except Exception:log('stream failed\n'+traceback.format_exc())
         finally:socket.close()
