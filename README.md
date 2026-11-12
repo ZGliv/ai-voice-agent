@@ -6,7 +6,7 @@ The Vercel site is a launcher and setup guide. The working app runs at **http://
 
 ## Open on this Mac or phone
 
-This Mac runs Jarvis as the login service `com.projectroom.jarvis`; no Terminal window needs to stay open. Open http://127.0.0.1:4321 on the Mac, or https://zacks-macbook-pro.tail7e2d89.ts.net/ on your Tailscale-connected phone. Keep the Mac awake and signed in.
+This Mac runs Jarvis as the login service `com.projectroom.jarvis`; no Terminal window needs to stay open. Open http://127.0.0.1:4321 on the Mac, or https://<your-mac>.<tailnet>.ts.net/ on your Tailscale-connected phone. Keep the Mac awake and signed in.
 
 To check the installed service:
 
@@ -213,7 +213,7 @@ Ask Jarvis to change or continue a previous task. It identifies the saved job an
 Snapshots omit Git metadata, credentials/environment files, dependency caches, and symlinks; omitted paths are recorded for the worker in .jarvis-copy-notes.txt. Copies are limited to 30,000 files / 500 MiB. The child uses a fresh Git repository, not the original commit history. Existing-project dependencies may need setup before it can run a build. A previous preview manifest is removed from the snapshot, so the worker must explicitly produce a new one after the follow-up.
 
 ### Phone previews
-The live setup serves previews privately through Tailscale at https://zacks-macbook-pro.tail7e2d89.ts.net:8443/ (loopback service 4323). Jarvis controls remain on the separate default HTTPS origin. Nothing uses public Funnel. From a completed task, choose Open on this device. Static absolute asset paths continue to work because the selected site occupies the preview root.
+The live setup serves previews privately through Tailscale at https://<your-mac>.<tailnet>.ts.net:8443/ (loopback service 4323). Jarvis controls remain on the separate default HTTPS origin. Nothing uses public Funnel. From a completed task, choose Open on this device. Static absolute asset paths continue to work because the selected site occupies the preview root.
 
 This is one shared preview slot: selecting another site changes what that address serves, including other open preview tabs. The selected job ID is saved privately and its validated preview is restored on restart. API requests from the preview origin are rejected, and generated sites retain a restrictive content policy. Physical phone acceptance still requires Tailscale connection; desktop verification used the actual private HTTPS address at mobile dimensions.
 
